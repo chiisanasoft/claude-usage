@@ -220,6 +220,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .footer-content a { color: var(--blue); text-decoration: none; }
   .footer-content a:hover { text-decoration: underline; }
 
+  .limits-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; margin-bottom: 24px; }
+  .limits-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 18px; gap: 12px; flex-wrap: wrap; }
+  .limits-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .limits-title .plan { color: var(--accent); margin-left: 8px; }
+  .limits-src { font-size: 11px; color: var(--muted); }
+  .limits-src .ok { color: var(--green); }
+  .limits-src .est { color: #eab308; }
+  .limit-row { margin-bottom: 16px; }
+  .limit-row:last-child { margin-bottom: 0; }
+  .limit-row.sub { margin-left: 18px; }
+  .limit-line { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; gap: 12px; }
+  .limit-name { color: var(--text); font-weight: 500; font-size: 13px; }
+  .limit-name .reset { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 8px; }
+  .limit-right { display: flex; align-items: baseline; gap: 12px; white-space: nowrap; }
+  .limit-used { color: var(--muted); font-size: 11px; font-family: monospace; }
+  .limit-pct { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); min-width: 42px; text-align: right; }
+  .limit-pct.na { color: var(--muted); font-weight: 400; }
+  .limit-track { height: 8px; background: rgba(255,255,255,0.07); border-radius: 6px; overflow: hidden; }
+  .limit-fill { height: 100%; border-radius: 6px; transition: width 0.4s ease; background: var(--blue); width: 0; }
+  .limit-fill.warn { background: #eab308; }
+  .limit-fill.danger { background: #ef4444; }
+  .limits-tip { margin-top: 14px; font-size: 11px; color: var(--muted); }
+  .limits-tip code { background: rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+
   @media (max-width: 768px) { .charts-grid { grid-template-columns: 1fr; } .chart-card.wide { grid-column: 1; } }
 </style>
 </head>
@@ -250,6 +274,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 <div class="container">
+  <div class="limits-card" id="limits-card" style="display:none">
+    <div class="limits-head">
+      <div class="limits-title">Plan Limits<span class="plan" id="limits-plan"></span></div>
+      <div class="limits-src" id="limits-src"></div>
+    </div>
+    <div id="limits-rows"></div>
+    <div class="limits-tip" id="limits-tip" style="display:none"></div>
+  </div>
   <div class="stats-row" id="stats-row"></div>
   <div class="charts-grid">
     <div class="chart-card wide">
@@ -1196,6 +1228,67 @@ async function triggerRescan() {
   setTimeout(() => { btn.textContent = '\u21bb Rescan'; btn.disabled = false; }, 3000);
 }
 
+// ── Plan limits (session / weekly indicators) ───────────────────────────────
+function limitFillClass(pct) {
+  if (pct === null || pct === undefined) return '';
+  if (pct >= 90) return 'danger';
+  if (pct >= 70) return 'warn';
+  return '';
+}
+function renderLimitRow(b, isSub) {
+  const pct = b.pct;
+  const hasPct = pct !== null && pct !== undefined;
+  const width = hasPct ? Math.min(100, pct) : 0;
+  const pctText = hasPct ? Math.round(pct) + '%' : '—';
+  const reset = b.resets_in ? '<span class="reset">resets in ' + esc(b.resets_in) + '</span>' : '';
+  const used = '$' + (b.consumption_usd || 0).toFixed(2) + ' · ' + (b.turns || 0) + ' turns';
+  return '' +
+    '<div class="limit-row' + (isSub ? ' sub' : '') + '">' +
+      '<div class="limit-line">' +
+        '<div class="limit-name">' + esc(b.label) + reset + '</div>' +
+        '<div class="limit-right">' +
+          '<span class="limit-used">' + used + '</span>' +
+          '<span class="limit-pct' + (hasPct ? '' : ' na') + '">' + pctText + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="limit-track"><div class="limit-fill ' + limitFillClass(pct) +
+        '" style="width:' + width + '%"></div></div>' +
+    '</div>';
+}
+function renderLimits(d) {
+  const card = document.getElementById('limits-card');
+  if (!d || d.error) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  document.getElementById('limits-plan').textContent = d.plan ? ('  ' + d.plan) : '';
+  const src = document.getElementById('limits-src');
+  src.innerHTML = d.api_ok
+    ? 'Source: <span class="ok">live API ✓</span> · updated ' + esc(d.generated_at)
+    : 'Source: <span class="est">local estimate</span> · updated ' + esc(d.generated_at);
+  let rows = renderLimitRow(d.session, false);
+  rows += renderLimitRow(d.weekly_all, false);
+  if (d.weekly_opus) rows += renderLimitRow(d.weekly_opus, true);
+  if (d.weekly_sonnet && (d.weekly_sonnet.turns > 0 || d.weekly_sonnet.pct != null))
+    rows += renderLimitRow(d.weekly_sonnet, true);
+  document.getElementById('limits-rows').innerHTML = rows;
+  const tip = document.getElementById('limits-tip');
+  const uncal = !d.api_ok &&
+    (d.session.source === 'uncalibrated' || d.weekly_all.source === 'uncalibrated');
+  if (uncal) {
+    tip.style.display = 'block';
+    tip.innerHTML = 'Bars are uncalibrated. Calibrate against the desktop Usage screen, e.g. ' +
+      '<code>claude-usage limits --calibrate-session 20 --calibrate-weekly 40</code>, ' +
+      'or enable the usage API.';
+  } else {
+    tip.style.display = 'none';
+  }
+}
+async function loadLimits() {
+  try {
+    const resp = await fetch('/api/limits');
+    renderLimits(await resp.json());
+  } catch(e) { console.error(e); }
+}
+
 // ── Data loading ───────────────────────────────────────────────────────────
 async function loadData() {
   try {
@@ -1245,6 +1338,8 @@ function scheduleAutoRefresh() {
 
 loadData();
 scheduleAutoRefresh();
+loadLimits();
+setInterval(loadLimits, 30000);
 </script>
 </body>
 </html>
@@ -1268,6 +1363,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/data":
             data = get_dashboard_data()
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif path == "/api/limits":
+            try:
+                import limits
+                data = limits.compute(db_path=DB_PATH)
+            except Exception as e:
+                data = {"error": f"limits unavailable: {e}"}
             body = json.dumps(data).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

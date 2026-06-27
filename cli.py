@@ -10,6 +10,7 @@ Commands:
 
 import os
 import sys
+import json
 import sqlite3
 from pathlib import Path
 from datetime import datetime, date, timedelta
@@ -357,6 +358,134 @@ def cmd_stats():
     conn.close()
 
 
+def _supports_color():
+    return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def _bar(pct, width=24):
+    """Render a [████░░░░] bar. pct None -> empty/uncalibrated bar."""
+    if pct is None:
+        return "[" + ("." * width) + "]"
+    frac = max(0.0, min(1.0, pct / 100.0))
+    filled = int(round(frac * width))
+    bar = "#" * filled + "." * (width - filled)
+    if _supports_color():
+        color = "\033[32m"  # green
+        if pct >= 90:
+            color = "\033[31m"   # red
+        elif pct >= 70:
+            color = "\033[33m"   # yellow
+        return "[" + color + bar + "\033[0m" + "]"
+    return "[" + bar + "]"
+
+
+def _render_limit_block(b):
+    pct = b["pct"]
+    pct_str = f"{pct:>3.0f}%" if pct is not None else " n/a"
+    line = f"  {b['label']:<26} {_bar(pct)} {pct_str}"
+    if b["resets_in"]:
+        line += f"   resets in {b['resets_in']}"
+    print(line)
+    detail = f"      ${b['consumption_usd']:.2f} used  ·  {b['turns']} turns"
+    if b["source"] == "uncalibrated":
+        detail += "   (uncalibrated)"
+    elif b["source"] == "calibrated" and b["cap_usd"]:
+        detail += f"   (cap ~${b['cap_usd']:.2f}, calibrated)"
+    elif b["source"] == "api":
+        detail += "   (live from API)"
+    print(detail)
+
+
+def cmd_limits(args=None):
+    import limits
+    args = args or []
+
+    # Dump the raw read-only usage-API response (no token is printed). Useful for
+    # confirming the endpoint works and for refining the parser to the live shape.
+    if "--debug-api" in args:
+        cred = limits.read_oauth_credential()
+        if not cred:
+            print("No OAuth credential found in keychain "
+                  f"(service: '{limits.KEYCHAIN_SERVICE}').")
+            sys.exit(1)
+        print(f"Plan (from credential): {limits.subscription_label(cred)}")
+        raw = limits.fetch_api_usage()
+        if raw is None:
+            print("API call failed or returned no data (endpoint/headers/token).")
+            sys.exit(1)
+        print("Raw /api/oauth/usage response:")
+        print(json.dumps(raw, indent=2, ensure_ascii=False))
+        print("\nParsed by current parser:")
+        print(json.dumps(limits.parse_api_usage(raw), indent=2, ensure_ascii=False))
+        return
+
+    # Calibration flags: --calibrate-<window> <observed_pct>
+    calib_map = {
+        "--calibrate-session": "session",
+        "--calibrate-weekly":  "weekly_all",
+        "--calibrate-opus":    "weekly_opus",
+        "--calibrate-sonnet":  "weekly_sonnet",
+    }
+    for flag, window in calib_map.items():
+        val = parse_named_arg(args, flag)
+        if val is not None:
+            try:
+                cap, cost = limits.calibrate(window, float(val))
+                print(f"Calibrated {window}: observed {val}% at ${cost:.2f} used "
+                      f"-> cap ~${cap:.2f}")
+            except Exception as e:
+                print(f"Calibration failed: {e}")
+                sys.exit(1)
+
+    # Weekly reset anchor: --weekly-reset <DOW> <HOUR>  (DOW 0=Mon..6=Sun, local hour)
+    if "--weekly-reset" in args:
+        i = args.index("--weekly-reset")
+        try:
+            dow = int(args[i + 1]); hour = int(args[i + 2])
+            cfg = limits.load_config()
+            cfg["weekly_all"]["reset_dow"] = dow % 7
+            cfg["weekly_all"]["reset_hour"] = hour % 24
+            limits.save_config(cfg)
+            dows = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            print(f"Weekly reset anchor set to {dows[dow % 7]} {hour % 24:02d}:00 (local)")
+        except (IndexError, ValueError):
+            print("Usage: --weekly-reset <DOW 0=Mon..6=Sun> <HOUR 0-23>")
+            sys.exit(1)
+
+    use_api = False if "--no-api" in args else None
+    data = limits.compute(use_api=use_api)
+
+    if "--json" in args:
+        print(json.dumps(data, indent=2))
+        return
+
+    if "error" in data:
+        print(data["error"])
+        sys.exit(1)
+
+    print()
+    hr("=")
+    plan = data["plan"] or "unknown plan"
+    src = "API ✓" if data["api_ok"] else "local estimate"
+    print(f"  Claude Usage Limits   Plan: {plan}   [{src}]")
+    hr("=")
+    _render_limit_block(data["session"])
+    print()
+    _render_limit_block(data["weekly_all"])
+    _render_limit_block(data["weekly_opus"])
+    _render_limit_block(data["weekly_sonnet"])
+    hr()
+    if not data["api_ok"]:
+        any_uncal = any(data[w]["source"] == "uncalibrated"
+                        for w in ("session", "weekly_all"))
+        if any_uncal:
+            print("  Tip: calibrate against the desktop app's Usage screen, e.g.:")
+            print("       claude-usage limits --calibrate-session 20 --calibrate-weekly 40")
+    print(f"  Updated: {data['generated_at']}")
+    hr("=")
+    print()
+
+
 def cmd_dashboard(projects_dir=None, host=None, port=None):
     import webbrowser
     import threading
@@ -390,6 +519,10 @@ Usage:
   python cli.py today                        Show today's usage summary
   python cli.py week                         Show last 7 days (per-day + by-model)
   python cli.py stats                        Show all-time statistics
+  python cli.py limits [--no-api] [--json]    Session (5h) + weekly limit indicators
+                       [--calibrate-session N] [--calibrate-weekly N]
+                       [--calibrate-opus N] [--calibrate-sonnet N]
+                       [--weekly-reset DOW HOUR]
   python cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
                                                  Scan + start dashboard
 """
@@ -399,6 +532,7 @@ COMMANDS = {
     "today": cmd_today,
     "week": cmd_week,
     "stats": cmd_stats,
+    "limits": cmd_limits,
     "dashboard": cmd_dashboard,
 }
 
@@ -426,5 +560,7 @@ if __name__ == "__main__":
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
+    elif command == "limits":
+        cmd_limits(rest)
     else:
         COMMANDS[command]()
