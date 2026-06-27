@@ -469,13 +469,26 @@ def _block(consumption, turns, by_model, cap_usd, reset_at, now, label,
     }
 
 
-def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True):
+def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
+            scan_first=False):
     """Return the full indicator payload. Pure read; may persist auto-calibrated
-    caps back to the config file when fresh API values are available."""
+    caps back to the config file when fresh API values are available.
+
+    scan_first runs an incremental scan first (fast on re-run) so the local
+    $/turn figures reflect activity since the last scan — important right after
+    a 5-hour window resets, when the DB would otherwise show 0 turns."""
     now = now or _now_utc()
     cfg = load_config()
     if use_api is None:
         use_api = cfg.get("use_api", True)
+
+    if scan_first:
+        try:
+            import scanner
+            scanner.scan(db_path=db_path, projects_dirs=scanner.DEFAULT_PROJECTS_DIRS,
+                         verbose=False)
+        except Exception:
+            pass
 
     if not db_path.exists():
         return {"error": "Database not found. Run: claude-usage scan"}

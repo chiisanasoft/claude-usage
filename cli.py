@@ -449,7 +449,7 @@ def cmd_limits(args=None):
             sys.exit(1)
 
     use_api = False if "--no-api" in args else None
-    data = limits.compute(use_api=use_api)
+    data = limits.compute(use_api=use_api, scan_first="--no-scan" not in args)
 
     if "--json" in args:
         print(json.dumps(data, indent=2))
@@ -517,7 +517,7 @@ Usage:
   python cli.py today                        Show today's usage summary
   python cli.py week                         Show last 7 days (per-day + by-model)
   python cli.py stats                        Show all-time statistics
-  python cli.py limits [--no-api] [--json]    Session (5h) + weekly limit indicators
+  python cli.py limits [--no-api] [--json] [--no-scan]   Session (5h) + weekly limits
                        [--calibrate-session N] [--calibrate-weekly N]
                        [--calibrate-opus N] [--calibrate-sonnet N]
                        [--weekly-reset DOW HOUR]

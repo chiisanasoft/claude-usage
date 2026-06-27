@@ -1376,7 +1376,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/api/limits":
             try:
                 import limits
-                data = limits.compute(db_path=DB_PATH)
+                # Incremental-scan first so $/turn reflects the current window
+                # (e.g. right after a 5h reset the DB would show 0 otherwise).
+                data = limits.compute(db_path=DB_PATH, scan_first=True)
             except Exception as e:
                 data = {"error": f"limits unavailable: {e}"}
             body = json.dumps(data).encode("utf-8")
