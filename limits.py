@@ -219,6 +219,24 @@ def _local_weekly_start(now, reset_dow, reset_hour):
 
 # ── API (read-only, no token cost) ──────────────────────────────────────────
 
+def _claude_oauth(cred):
+    """The Claude.ai OAuth sub-object of the keychain credential, or None.
+    (The credential also holds unrelated `mcpOAuth.*` entries whose own
+    `accessToken` fields are empty — read only this documented location.)"""
+    if isinstance(cred, dict):
+        node = cred.get("claudeAiOauth")
+        if isinstance(node, dict):
+            return node
+    return None
+
+
+def _find_token(cred):
+    """Read the Claude.ai OAuth access token from its standard location."""
+    node = _claude_oauth(cred)
+    tok = node.get("accessToken") if node else None
+    return tok if isinstance(tok, str) and tok else None
+
+
 def _find_key(obj, target):
     """Recursively find the first value whose key == target (case-insensitive)."""
     tl = target.lower()
@@ -261,7 +279,7 @@ def fetch_api_usage(timeout=10):
     cred = read_oauth_credential()
     if not cred:
         return None
-    token = _find_key(cred, "accessToken")
+    token = _find_token(cred)
     if not token:
         return None
     import urllib.request
@@ -289,12 +307,14 @@ def debug_api_probe(timeout=15):
         diag["hint"] = "No credential in keychain — is Claude Code logged in?"
         return diag
 
-    diag["subscriptionType"] = _find_key(cred, "subscriptionType")
-    diag["scopes"] = _find_key(cred, "scopes")
-    token = _find_key(cred, "accessToken")
+    node = _claude_oauth(cred) or {}
+    diag["subscriptionType"] = node.get("subscriptionType")
+    diag["rateLimitTier"] = node.get("rateLimitTier")
+    diag["scopes"] = node.get("scopes")
+    token = _find_token(cred)
     diag["token_present"] = bool(token)
     diag["token_len"] = len(token) if token else 0
-    exp = _find_key(cred, "expiresAt")
+    exp = node.get("expiresAt")
     diag["expiresAt_raw"] = exp
     if exp is not None:
         try:
@@ -336,19 +356,20 @@ def debug_api_probe(timeout=15):
 
 
 def subscription_label(cred):
-    """Best-effort human label for the plan from the credential, e.g. 'Max (5x)'."""
-    if not cred:
+    """Best-effort human label for the plan from the credential, e.g. 'Max (5x)'.
+    Prefers rateLimitTier (e.g. 'default_claude_max_5x') for the multiplier."""
+    node = _claude_oauth(cred)
+    if not node:
         return None
-    sub = _find_key(cred, "subscriptionType")
+    tier = str(node.get("rateLimitTier") or "").lower()
+    if "max_20x" in tier:
+        return "Max (20x)"
+    if "max_5x" in tier:
+        return "Max (5x)"
+    sub = node.get("subscriptionType")
     if not sub:
         return None
-    m = {
-        "max": "Max",
-        "max_5x": "Max (5x)",
-        "max_20x": "Max (20x)",
-        "pro": "Pro",
-    }
-    return m.get(str(sub).lower(), str(sub))
+    return {"max": "Max", "pro": "Pro"}.get(str(sub).lower(), str(sub))
 
 
 def parse_api_usage(raw):
