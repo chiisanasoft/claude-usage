@@ -403,20 +403,16 @@ def cmd_limits(args=None):
     # Dump the raw read-only usage-API response (no token is printed). Useful for
     # confirming the endpoint works and for refining the parser to the live shape.
     if "--debug-api" in args:
-        cred = limits.read_oauth_credential()
-        if not cred:
-            print("No OAuth credential found in keychain "
-                  f"(service: '{limits.KEYCHAIN_SERVICE}').")
-            sys.exit(1)
-        print(f"Plan (from credential): {limits.subscription_label(cred)}")
-        raw = limits.fetch_api_usage()
-        if raw is None:
-            print("API call failed or returned no data (endpoint/headers/token).")
-            sys.exit(1)
-        print("Raw /api/oauth/usage response:")
-        print(json.dumps(raw, indent=2, ensure_ascii=False))
-        print("\nParsed by current parser:")
-        print(json.dumps(limits.parse_api_usage(raw), indent=2, ensure_ascii=False))
+        diag = limits.debug_api_probe()
+        print("=== API probe diagnostics (no token is printed) ===")
+        print(json.dumps(diag, indent=2, ensure_ascii=False))
+        if diag.get("http_status") == 200 and diag.get("body"):
+            try:
+                raw = json.loads(diag["body"])
+                print("\nParsed by current parser:")
+                print(json.dumps(limits.parse_api_usage(raw), indent=2, ensure_ascii=False))
+            except Exception as e:
+                print(f"\n(could not parse body as JSON: {e})")
         return
 
     # Calibration flags: --calibrate-<window> <observed_pct>

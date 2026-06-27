@@ -47,7 +47,18 @@ WEEK_DAYS = 7
 # OAuth usage endpoint (same one Claude Code's `/usage` uses). Read-only.
 API_URL = "https://api.anthropic.com/api/oauth/usage"
 API_BETA = "oauth-2025-04-20"
+API_VERSION = "2023-06-01"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+def _api_headers(token):
+    # OAuth-token requests need the bearer + version + the oauth beta header.
+    return {
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": API_BETA,
+        "anthropic-version": API_VERSION,
+        "User-Agent": "claude-usage-limits/1.0",
+    }
 
 # How long an API snapshot is considered "fresh" for auto-calibration display.
 API_FRESH_SECONDS = 120
@@ -254,22 +265,74 @@ def fetch_api_usage(timeout=10):
     if not token:
         return None
     import urllib.request
-    import urllib.error
-    req = urllib.request.Request(
-        API_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "anthropic-beta": API_BETA,
-            "Content-Type": "application/json",
-            "User-Agent": "claude-usage-limits/1.0",
-        },
-        method="GET",
-    )
+    req = urllib.request.Request(API_URL, headers=_api_headers(token), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None
+
+
+def debug_api_probe(timeout=15):
+    """Verbose, non-secret diagnostics for why the usage API does or doesn't
+    work. Never returns or prints the token itself — only its length and
+    expiry. Used by `claude-usage limits --debug-api`."""
+    import time
+    import urllib.request
+    import urllib.error
+
+    diag = {"url": API_URL, "headers_sent": ["Authorization: Bearer <hidden>",
+            f"anthropic-beta: {API_BETA}", f"anthropic-version: {API_VERSION}"]}
+    cred = read_oauth_credential()
+    diag["credential_found"] = bool(cred)
+    if not cred:
+        diag["hint"] = "No credential in keychain — is Claude Code logged in?"
+        return diag
+
+    diag["subscriptionType"] = _find_key(cred, "subscriptionType")
+    diag["scopes"] = _find_key(cred, "scopes")
+    token = _find_key(cred, "accessToken")
+    diag["token_present"] = bool(token)
+    diag["token_len"] = len(token) if token else 0
+    exp = _find_key(cred, "expiresAt")
+    diag["expiresAt_raw"] = exp
+    if exp is not None:
+        try:
+            exp_ms = float(exp)
+            # expiresAt is epoch milliseconds in Claude Code credentials.
+            now_ms = time.time() * 1000
+            diag["expired"] = exp_ms < now_ms
+            diag["expires_in_min"] = round((exp_ms - now_ms) / 60000, 1)
+        except Exception as e:
+            diag["expiry_parse_error"] = f"{type(e).__name__}: {e}"
+
+    if not token:
+        diag["hint"] = "Credential has no accessToken field."
+        return diag
+
+    req = urllib.request.Request(API_URL, headers=_api_headers(token), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            diag["http_status"] = resp.status
+            diag["body"] = body[:2000]
+    except urllib.error.HTTPError as e:
+        diag["http_status"] = e.code
+        try:
+            diag["body"] = e.read().decode("utf-8", "replace")[:2000]
+        except Exception:
+            diag["body"] = "(no body)"
+        if e.code == 401:
+            diag["hint"] = ("401 Unauthorized — token rejected. If 'expired' is "
+                            "true above, the keychain copy is stale; open Claude "
+                            "Code (or run `claude`) to refresh, then retry.")
+        elif e.code == 403:
+            diag["hint"] = "403 Forbidden — token valid but lacks scope for this endpoint."
+        elif e.code == 404:
+            diag["hint"] = "404 — endpoint path/method may differ from /api/oauth/usage."
+    except Exception as e:
+        diag["error"] = f"{type(e).__name__}: {e}"
+    return diag
 
 
 def subscription_label(cred):
