@@ -468,8 +468,10 @@ def cmd_limits(args=None):
     _render_limit_block(data["session"])
     print()
     _render_limit_block(data["weekly_all"])
-    _render_limit_block(data["weekly_opus"])
-    _render_limit_block(data["weekly_sonnet"])
+    if data.get("weekly_opus"):
+        _render_limit_block(data["weekly_opus"])
+    if data.get("weekly_sonnet"):
+        _render_limit_block(data["weekly_sonnet"])
     hr()
     if not data["api_ok"]:
         any_uncal = any(data[w]["source"] == "uncalibrated"

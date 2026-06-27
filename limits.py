@@ -546,12 +546,26 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True):
     weekly_all = _block(w_cost, w_turns, w_models, cfg["weekly_all"].get("cap_usd"),
                         w_reset, now, "Weekly - all models",
                         api_node("weekly_all").get("pct"), api_node("weekly_all").get("resets_at"))
+    # Per-model weekly sub-limits exist only for some plans. When the API is
+    # live it tells us exactly which ones apply (a null seven_day_opus means the
+    # account has no separate Opus cap — don't invent a row for it). Without the
+    # API we can't know the cap structure, so only show a per-model row if there
+    # is local usage to report.
+    if api_ok:
+        include_opus = "weekly_opus" in api
+        include_sonnet = "weekly_sonnet" in api
+    else:
+        include_opus = o_turns > 0
+        include_sonnet = so_turns > 0
+
     weekly_opus = _block(o_cost, o_turns, o_models, cfg["weekly_opus"].get("cap_usd"),
                          w_reset, now, "Weekly - Opus",
-                         api_node("weekly_opus").get("pct"), api_node("weekly_opus").get("resets_at"))
+                         api_node("weekly_opus").get("pct"),
+                         api_node("weekly_opus").get("resets_at")) if include_opus else None
     weekly_sonnet = _block(so_cost, so_turns, so_models, cfg["weekly_sonnet"].get("cap_usd"),
                            w_reset, now, "Weekly - Sonnet",
-                           api_node("weekly_sonnet").get("pct"), api_node("weekly_sonnet").get("resets_at"))
+                           api_node("weekly_sonnet").get("pct"),
+                           api_node("weekly_sonnet").get("resets_at")) if include_sonnet else None
 
     return {
         "plan": plan,

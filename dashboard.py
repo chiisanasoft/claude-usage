@@ -1267,8 +1267,7 @@ function renderLimits(d) {
   let rows = renderLimitRow(d.session, false);
   rows += renderLimitRow(d.weekly_all, false);
   if (d.weekly_opus) rows += renderLimitRow(d.weekly_opus, true);
-  if (d.weekly_sonnet && (d.weekly_sonnet.turns > 0 || d.weekly_sonnet.pct != null))
-    rows += renderLimitRow(d.weekly_sonnet, true);
+  if (d.weekly_sonnet) rows += renderLimitRow(d.weekly_sonnet, true);
   document.getElementById('limits-rows').innerHTML = rows;
   const tip = document.getElementById('limits-tip');
   const uncal = !d.api_ok &&

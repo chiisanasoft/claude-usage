@@ -133,6 +133,21 @@ class TestApiParser(unittest.TestCase):
         self.assertAlmostEqual(out["weekly_opus"]["pct"], 39.0)
         self.assertEqual(out["session"]["resets_at"], "2026-06-27T15:00:00Z")
 
+    def test_parse_real_shape(self):
+        # Mirrors the live /api/oauth/usage response: utilization is a 0-100
+        # percent, seven_day_opus is null for accounts without an Opus sub-limit.
+        raw = {
+            "five_hour": {"utilization": 62.0, "resets_at": "2026-06-27T12:09:59.797540+00:00"},
+            "seven_day": {"utilization": 48.0, "resets_at": "2026-06-30T13:59:59+00:00"},
+            "seven_day_opus": None,
+            "seven_day_sonnet": {"utilization": 0.0, "resets_at": None},
+        }
+        out = limits.parse_api_usage(raw)
+        self.assertAlmostEqual(out["session"]["pct"], 62.0)
+        self.assertAlmostEqual(out["weekly_all"]["pct"], 48.0)
+        self.assertIn("weekly_sonnet", out)
+        self.assertNotIn("weekly_opus", out)  # null -> no row
+
     def test_parse_used_over_limit(self):
         raw = {"session": {"used": 50, "limit": 200}}
         out = limits.parse_api_usage(raw)
