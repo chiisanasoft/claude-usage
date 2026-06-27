@@ -1358,6 +1358,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # Never cache the SPA shell, so reopening the dashboard after an
+            # upgrade always serves the current HTML/JS (avoids a stale page
+            # missing newly added sections like the limits indicators).
+            self.send_header("Cache-Control", "no-store, max-age=0")
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
 
