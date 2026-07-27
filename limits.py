@@ -40,6 +40,15 @@ from cli import calc_cost, get_pricing
 
 DB_PATH = Path.home() / ".claude" / "usage.db"
 CONFIG_PATH = Path.home() / ".claude" / "claude-usage-limits.json"
+# Cached API snapshot + back-off clock. Kept out of CONFIG_PATH so the config
+# stays a small hand-editable settings file.
+STATE_PATH = Path.home() / ".claude" / "claude-usage-limits-state.json"
+
+# The usage endpoint answers 429 under frequent polling, and we are called from
+# a 30-second dashboard refresh as well as from every CLI run. Serve a cached
+# snapshot inside this window, and stay quiet for a while after a 429.
+API_CACHE_SECONDS = 120
+API_BACKOFF_SECONDS = 600
 
 SESSION_HOURS = 5
 WEEK_DAYS = 7
@@ -73,7 +82,11 @@ API_FRESH_SECONDS = 120
 
 def default_config():
     return {
-        "plan": None,                 # e.g. "Max (5x)" - filled from API when known
+        "plan": None,                 # e.g. "Max (5x)" - derived from the credential
+        "plan_override": None,        # user-set label; wins over the derived one
+        # Which per-model weekly sub-limits the API last confirmed. Empty until
+        # a first successful API call; see the inclusion logic in compute().
+        "known_sublimits": {},
         "use_api": True,              # try the read-only usage API
         # calibrated_pct / window_reset_at record *what* a cap was derived from so
         # a coarse low reading can't clobber a cap derived from a reliable high one.
@@ -336,23 +349,70 @@ def read_oauth_credential():
         return None
 
 
-def fetch_api_usage(timeout=10):
+def _read_state():
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _write_state(state):
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        STATE_PATH.write_text(json.dumps(state))
+    except Exception:
+        pass
+
+
+def fetch_api_usage(timeout=10, now=None, force=False):
     """Call the read-only usage endpoint. Returns the raw parsed JSON dict on
-    success, or None. No model inference is performed, so this costs nothing and
-    does not consume the rate limit."""
+    success, or None.
+
+    The endpoint performs no inference, so it costs nothing and consumes none of
+    the plan's token budget — but it IS rate limited (it answers 429 under
+    frequent polling), and this tool is called from a dashboard that refreshes
+    every 30 seconds *and* from every CLI invocation. So responses are cached on
+    disk for API_CACHE_SECONDS and a 429 triggers a back-off window during which
+    we serve the last good snapshot instead of hammering the endpoint.
+    """
+    now_ts = (now or _now_utc()).timestamp()
+    state = _read_state()
+    cached = state.get("api_raw")
+    cached_at = state.get("api_at") or 0
+
+    if not force:
+        if cached and now_ts - cached_at < API_CACHE_SECONDS:
+            return cached
+        if now_ts < (state.get("api_backoff_until") or 0):
+            return cached  # may be None; either way, don't call during back-off
+
     cred = read_oauth_credential()
     if not cred:
-        return None
+        return cached
     token = _find_token(cred)
     if not token:
-        return None
+        return cached
+
     import urllib.request
+    import urllib.error
     req = urllib.request.Request(API_URL, headers=_api_headers(token), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = json.loads(resp.read().decode("utf-8"))
+        state["api_raw"] = raw
+        state["api_at"] = now_ts
+        state.pop("api_backoff_until", None)
+        _write_state(state)
+        return raw
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            state["api_backoff_until"] = now_ts + API_BACKOFF_SECONDS
+            _write_state(state)
+        # Serve the last good snapshot rather than silently dropping to a
+        # local-only estimate the moment one request is throttled.
+        return cached
     except Exception:
-        return None
+        return cached
 
 
 def debug_api_probe(timeout=15):
@@ -654,14 +714,19 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
     # be summed over exactly the window the percentage refers to) ──
     api = {}
     api_ok = False
-    plan = cfg.get("plan")
+    derived_plan = cfg.get("plan")
     if use_api:
         cred = read_oauth_credential()
-        plan = subscription_label(cred) or plan
+        derived_plan = subscription_label(cred) or derived_plan
         raw = fetch_api_usage()
         if raw is not None:
             api = parse_api_usage(raw)
             api_ok = bool(api)
+    # The keychain credential records the tier as it was when the token was
+    # issued, so it goes stale after a plan change (a Max 20x account can keep
+    # reporting default_claude_max_5x until the token is reissued). An explicit
+    # `claude-usage limits --set-plan` always wins over the derived label.
+    plan = cfg.get("plan_override") or derived_plan
 
     def api_node(name):
         return api.get(name, {}) if api_ok else {}
@@ -746,8 +811,17 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
             cfg[name]["calibrated_at"] = _iso_z(now)
             cfg[name]["calibrated_pct"] = p
             changed = True
-        if plan and plan != cfg.get("plan"):
-            cfg["plan"] = plan
+        # Cache the *derived* label only. Caching the override instead would
+        # make clearing it fall back to the override, not to the real tier.
+        if derived_plan and derived_plan != cfg.get("plan"):
+            cfg["plan"] = derived_plan
+            changed = True
+        # Remember which per-model sub-limits this account actually has, so an
+        # API outage doesn't resurrect rows the account has no cap for.
+        seen = {"weekly_opus": "weekly_opus" in api,
+                "weekly_sonnet": "weekly_sonnet" in api}
+        if seen != cfg.get("known_sublimits"):
+            cfg["known_sublimits"] = seen
             changed = True
         if changed:
             try:
@@ -766,12 +840,22 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
                         api_node("weekly_all").get("severity"), w_priced)
     # Per-model weekly sub-limits exist only for some plans. When the API is
     # live it tells us exactly which ones apply (a null seven_day_opus means the
-    # account has no separate Opus cap — don't invent a row for it). Without the
-    # API we can't know the cap structure, so only show a per-model row if there
-    # is local usage to report.
+    # account has no separate Opus cap — don't invent a row for it).
+    #
+    # When the API is down we must not fall back to "there are Opus turns, so
+    # draw an Opus row": on an account with no Opus sub-limit that fabricates a
+    # row that can never have a percentage, so it renders as a permanent "n/a"
+    # with a countdown and no usage — which reads as a broken indicator. Instead
+    # remember what the API last told us about the cap *structure* and reuse it;
+    # the local turn heuristic is only for accounts we have never seen the API
+    # for at all.
+    known = cfg.get("known_sublimits") or {}
     if api_ok:
         include_opus = "weekly_opus" in api
         include_sonnet = "weekly_sonnet" in api
+    elif known:
+        include_opus = bool(known.get("weekly_opus"))
+        include_sonnet = bool(known.get("weekly_sonnet"))
     else:
         include_opus = o_turns > 0
         include_sonnet = so_turns > 0

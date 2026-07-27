@@ -455,6 +455,26 @@ def cmd_limits(args=None):
             print("Usage: --weekly-reset <DOW 0=Mon..6=Sun> <HOUR 0-23>")
             sys.exit(1)
 
+    # Plan label override: --set-plan "Max (20x)"  (--set-plan auto to clear).
+    # The keychain credential reports the tier from when the token was issued,
+    # so it lags a plan upgrade until the token is reissued.
+    if "--set-plan" in args:
+        i = args.index("--set-plan")
+        try:
+            label = args[i + 1]
+        except IndexError:
+            print('Usage: --set-plan "Max (20x)"   (or: --set-plan auto)')
+            sys.exit(1)
+        cfg = limits.load_config()
+        if label.lower() in ("auto", "clear", "none"):
+            cfg["plan_override"] = None
+            limits.save_config(cfg)
+            print(f"Plan override cleared (detected: {cfg.get('plan') or 'unknown'})")
+        else:
+            cfg["plan_override"] = label
+            limits.save_config(cfg)
+            print(f"Plan set to {label}")
+
     use_api = False if "--no-api" in args else None
     data = limits.compute(use_api=use_api, scan_first="--no-scan" not in args)
 

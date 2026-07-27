@@ -119,7 +119,9 @@ percentages. Full details: **[docs/DOCKER.md](docs/DOCKER.md)**.
 
 The percentage needs a cap that Anthropic doesn't publish and that isn't in the local logs, so it comes from one of three sources, in order of preference:
 
-1. **Live API** — the read-only `/api/oauth/usage` endpoint, authenticated with the OAuth token Claude Code already stored (macOS keychain). It is an undocumented usage-status endpoint: it runs no inference, so it costs nothing and consumes no tokens. Percentages and reset times then match the desktop app, and the caps are auto-calibrated in the background so estimates stay good later.
+1. **Live API** — the read-only `/api/oauth/usage` endpoint, authenticated with the OAuth token Claude Code already stored (macOS keychain). It is an undocumented usage-status endpoint: it runs no inference, so it costs nothing and consumes none of your token budget. It is rate limited, so responses are cached briefly on disk and throttled requests fall back to the last good snapshot instead of dropping to a local-only estimate. Percentages and reset times then match the desktop app, and the caps are auto-calibrated in the background so estimates stay good later.
+
+If the plan shown is wrong — the keychain credential records the tier from when the token was issued, so it lags a plan change — set it explicitly with `python cli.py limits --set-plan "Max (20x)"` (`--set-plan auto` returns to auto-detection).
 2. **Calibrated** — you tell it once what the desktop app shows (`--calibrate-session 20`) and the cap is backed out of your current consumption.
 3. **Uncalibrated** — no cap known. Consumption and the reset countdown are still shown; the bar reads `—`.
 
