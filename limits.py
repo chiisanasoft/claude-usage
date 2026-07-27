@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Reuse the single source of truth for pricing (AGENTS.md: don't add a 3rd copy).
-from cli import calc_cost
+from cli import calc_cost, get_pricing
 
 DB_PATH = Path.home() / ".claude" / "usage.db"
 CONFIG_PATH = Path.home() / ".claude" / "claude-usage-limits.json"
@@ -195,20 +195,29 @@ def _window_by_model(conn, start_iso, end_iso=None, model_like=None):
     by_model = []
     total_cost = 0.0
     total_turns = 0
+    priced_turns = 0
     for r in conn.execute(q, params).fetchall():
         cost = calc_cost(r["model"], r["inp"] or 0, r["out"] or 0, r["cr"] or 0, r["cc"] or 0)
+        # Models with no PRICING entry (local/3rd-party, or a family we don't
+        # know yet) are deliberately not billed at Sonnet rates — but their $0
+        # must not be mistaken for "this window cost nothing". Track how many
+        # turns we could actually price.
+        priced = get_pricing(r["model"]) is not None
+        if priced:
+            priced_turns += r["turns"] or 0
         total_cost += cost
         total_turns += r["turns"] or 0
         by_model.append({
             "model": r["model"],
             "turns": r["turns"] or 0,
+            "priced": priced,
             "input": r["inp"] or 0,
             "output": r["out"] or 0,
             "cache_read": r["cr"] or 0,
             "cache_creation": r["cc"] or 0,
             "cost": cost,
         })
-    return total_cost, total_turns, by_model
+    return total_cost, total_turns, by_model, priced_turns
 
 
 def _current_block_start(conn, now, lookback_hours=12):
@@ -578,19 +587,32 @@ def parse_api_usage(raw):
 # ── Public: compute the indicators ──────────────────────────────────────────
 
 def _block(consumption, turns, by_model, cap_usd, reset_at, now, label,
-           api_pct=None, api_reset=None, severity=None):
+           api_pct=None, api_reset=None, severity=None, priced_turns=None):
     eff_reset = _parse_any_ts(api_reset) or reset_at
+
+    # "We couldn't price any of these turns" is not the same statement as "this
+    # window cost nothing" — an empty window is genuinely $0.00, but a window of
+    # 2042 unpriced turns must be rendered as n/a. Renderers (CLI + dashboard)
+    # branch on cost_known rather than guessing from the number.
+    if priced_turns is None:
+        cost_known = True
+    else:
+        cost_known = turns == 0 or priced_turns > 0
 
     if api_pct is not None:
         pct, source = api_pct, "api"
-    elif cap_usd:
+    elif cap_usd and cost_known:
         pct, source = (consumption / cap_usd * 100.0), "calibrated"
     else:
+        # Without a priced consumption there is no numerator, so a cap can't
+        # produce a percentage — don't pass off 0% as a calibrated reading.
         pct, source = None, "uncalibrated"
 
     return {
         "label": label,
         "consumption_usd": round(consumption, 4),
+        "cost_known": cost_known,
+        "priced_turns": priced_turns if priced_turns is not None else turns,
         "turns": turns,
         "cap_usd": cap_usd,
         "pct": round(pct, 1) if pct is not None else None,
@@ -661,9 +683,9 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
         s_reset = s_start + s_len if s_start else None
         s_anchored = False
     if s_start is not None:
-        s_cost, s_turns, s_models = _window_by_model(conn, _iso_z(s_start))
+        s_cost, s_turns, s_models, s_priced = _window_by_model(conn, _iso_z(s_start))
     else:
-        s_cost, s_turns, s_models = 0.0, 0, []
+        s_cost, s_turns, s_models, s_priced = 0.0, 0, [], 0
 
     # ── Weekly (all models) ──
     w_len = timedelta(days=WEEK_DAYS)
@@ -676,20 +698,20 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
         w_start, w_reset = _local_weekly_start(
             now, cfg["weekly_all"].get("reset_dow"), cfg["weekly_all"].get("reset_hour"))
         w_anchored = False
-    w_cost, w_turns, w_models = _window_by_model(conn, _iso_z(w_start))
+    w_cost, w_turns, w_models, w_priced = _window_by_model(conn, _iso_z(w_start))
 
     # ── Weekly per-model ──
-    o_cost, o_turns, o_models = _window_by_model(conn, _iso_z(w_start), model_like="opus")
-    so_cost, so_turns, so_models = _window_by_model(conn, _iso_z(w_start), model_like="sonnet")
+    o_cost, o_turns, o_models, o_priced = _window_by_model(conn, _iso_z(w_start), model_like="opus")
+    so_cost, so_turns, so_models, so_priced = _window_by_model(conn, _iso_z(w_start), model_like="sonnet")
 
     # ── Scoped (per-model) weekly rows reported only by the `limits` array ──
     scoped_blocks = []
     for node in (api.get("scoped") or []) if api_ok else []:
         name = node.get("name") or "scoped"
-        c, t, m = _window_by_model(conn, _iso_z(w_start), model_like=name.lower())
+        c, t, m, pr = _window_by_model(conn, _iso_z(w_start), model_like=name.lower())
         scoped_blocks.append(_block(
             c, t, m, None, w_reset, now, f"Weekly - {name}",
-            node.get("pct"), node.get("resets_at"), node.get("severity")))
+            node.get("pct"), node.get("resets_at"), node.get("severity"), pr))
 
     conn.close()
 
@@ -736,12 +758,12 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
     session = _block(s_cost, s_turns, s_models, cfg["session"].get("cap_usd"),
                      s_reset, now, "Current session (5h)",
                      api_node("session").get("pct"), api_node("session").get("resets_at"),
-                     api_node("session").get("severity"))
+                     api_node("session").get("severity"), s_priced)
     weekly_all = _block(w_cost, w_turns, w_models, cfg["weekly_all"].get("cap_usd"),
                         w_reset, now, "Weekly - all models",
                         api_node("weekly_all").get("pct"),
                         api_node("weekly_all").get("resets_at"),
-                        api_node("weekly_all").get("severity"))
+                        api_node("weekly_all").get("severity"), w_priced)
     # Per-model weekly sub-limits exist only for some plans. When the API is
     # live it tells us exactly which ones apply (a null seven_day_opus means the
     # account has no separate Opus cap — don't invent a row for it). Without the
@@ -758,12 +780,14 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
                          w_reset, now, "Weekly - Opus",
                          api_node("weekly_opus").get("pct"),
                          api_node("weekly_opus").get("resets_at"),
-                         api_node("weekly_opus").get("severity")) if include_opus else None
+                         api_node("weekly_opus").get("severity"),
+                         o_priced) if include_opus else None
     weekly_sonnet = _block(so_cost, so_turns, so_models, cfg["weekly_sonnet"].get("cap_usd"),
                            w_reset, now, "Weekly - Sonnet",
                            api_node("weekly_sonnet").get("pct"),
                            api_node("weekly_sonnet").get("resets_at"),
-                           api_node("weekly_sonnet").get("severity")) if include_sonnet else None
+                           api_node("weekly_sonnet").get("severity"),
+                           so_priced) if include_sonnet else None
 
     return {
         "plan": plan,

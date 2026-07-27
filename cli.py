@@ -389,7 +389,11 @@ def _render_limit_block(b):
     if sev and sev != "normal":
         line += f"   [{sev}]"
     print(line)
-    detail = f"      ${b['consumption_usd']:.2f} used  ·  {b['turns']} turns"
+    # A window whose turns all ran on unpriced models (local/3rd-party, or a
+    # model family not in PRICING) has an unknown cost, not a zero one — saying
+    # "$0.00" next to 2000 turns reads as either a bug or as "this was free".
+    used = "$%.2f" % b["consumption_usd"] if b.get("cost_known", True) else "n/a"
+    detail = f"      {used} used  ·  {b['turns']} turns"
     if b["source"] == "uncalibrated":
         detail += "   (uncalibrated)"
     elif b["source"] == "calibrated" and b["cap_usd"]:
