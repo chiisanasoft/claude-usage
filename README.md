@@ -100,7 +100,7 @@ By default, the scanner checks both `~/.claude/projects/` and the Xcode Claude i
 
 The percentage needs a cap that Anthropic doesn't publish and that isn't in the local logs, so it comes from one of three sources, in order of preference:
 
-1. **Live API** — the same read-only `/api/oauth/usage` endpoint the desktop app and `claude /usage` use, authenticated with the OAuth token Claude Code already stored (macOS keychain). It costs nothing and consumes no rate limit. Percentages and reset times then match the desktop app exactly, and the caps are auto-calibrated in the background so estimates stay good later.
+1. **Live API** — the read-only `/api/oauth/usage` endpoint, authenticated with the OAuth token Claude Code already stored (macOS keychain). It is an undocumented usage-status endpoint: it runs no inference, so it costs nothing and consumes no tokens. Percentages and reset times then match the desktop app, and the caps are auto-calibrated in the background so estimates stay good later.
 2. **Calibrated** — you tell it once what the desktop app shows (`--calibrate-session 20`) and the cap is backed out of your current consumption.
 3. **Uncalibrated** — no cap known. Consumption and the reset countdown are still shown; the bar reads `—`.
 
