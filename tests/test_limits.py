@@ -40,34 +40,45 @@ def _make_db(rows):
 
 
 _REAL_CONFIG_PATH = limits.CONFIG_PATH
+_REAL_STATE_PATH = limits.STATE_PATH
 _MODULE_TMPDIR = None
 
 
 def setUpModule():
     """Safety net: no test in this module may read or write the user's real
-    ~/.claude/claude-usage-limits.json (see AGENTS.md)."""
+    ~/.claude/claude-usage-limits.json or the cached API state file next to it
+    (see AGENTS.md)."""
     global _MODULE_TMPDIR
     _MODULE_TMPDIR = tempfile.TemporaryDirectory()
     limits.CONFIG_PATH = Path(_MODULE_TMPDIR.name) / "module-limits.json"
+    limits.STATE_PATH = Path(_MODULE_TMPDIR.name) / "module-limits-state.json"
 
 
 def tearDownModule():
     limits.CONFIG_PATH = _REAL_CONFIG_PATH
+    limits.STATE_PATH = _REAL_STATE_PATH
     if _MODULE_TMPDIR is not None:
         _MODULE_TMPDIR.cleanup()
 
 
 class TempConfigTestCase(unittest.TestCase):
-    """Base class giving every test its own absent-at-start config file."""
+    """Base class giving every test its own absent-at-start config + API state
+    files. Both must be redirected: fetch_api_usage caches the raw API snapshot
+    and its 429 back-off clock in STATE_PATH, so a test that left it pointing at
+    the real file would read and overwrite the user's cached snapshot."""
 
     def setUp(self):
         self._orig_cfg = limits.CONFIG_PATH
+        self._orig_state = limits.STATE_PATH
         self._cfg_dir = tempfile.TemporaryDirectory()
         limits.CONFIG_PATH = Path(self._cfg_dir.name) / "limits.json"
+        limits.STATE_PATH = Path(self._cfg_dir.name) / "limits-state.json"
         self.assertNotEqual(limits.CONFIG_PATH, _REAL_CONFIG_PATH)
+        self.assertNotEqual(limits.STATE_PATH, _REAL_STATE_PATH)
 
     def tearDown(self):
         limits.CONFIG_PATH = self._orig_cfg
+        limits.STATE_PATH = self._orig_state
         self._cfg_dir.cleanup()
 
 
@@ -256,11 +267,11 @@ class TestLimitsArrayParser(TempConfigTestCase):
 class ApiComputeTestCase(TempConfigTestCase):
     """Base that stubs the network + keychain so compute() can use an overlay."""
 
-    def _use_api(self, raw):
+    def _use_api(self, raw, cred=None):
         self._orig_fetch = limits.fetch_api_usage
         self._orig_cred = limits.read_oauth_credential
         limits.fetch_api_usage = lambda *a, **k: raw
-        limits.read_oauth_credential = lambda *a, **k: None
+        limits.read_oauth_credential = lambda *a, **k: cred
         self.addCleanup(self._restore)
 
     def _restore(self):
@@ -450,6 +461,302 @@ class TestHalfHourFloor(TempConfigTestCase):
         start, reset = limits._anchored_window(
             limits._iso_z(now + timedelta(hours=1)), timedelta(hours=5), now)
         self.assertEqual(reset - start, timedelta(hours=5))
+
+
+class _FakeResponse:
+    """Minimal stand-in for the object urlopen() returns."""
+
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class ApiFetchTestCase(TempConfigTestCase):
+    """Base for fetch_api_usage tests: stubs the keychain and the urllib layer so
+    nothing here can touch the network or the real credential store."""
+
+    CRED = {"claudeAiOauth": {"accessToken": "tok-abc",
+                              "rateLimitTier": "default_claude_max_5x"}}
+    RAW = {"five_hour": {"utilization": 62.0}}
+
+    def setUp(self):
+        super().setUp()
+        import urllib.request
+        self._urllib = urllib.request
+        self._orig_urlopen = urllib.request.urlopen
+        self._orig_cred = limits.read_oauth_credential
+        self._orig_findtok = limits._find_token
+        limits.read_oauth_credential = lambda *a, **k: self.CRED
+        limits._find_token = lambda cred: "tok-abc"
+        self.calls = []
+        self.addCleanup(self._restore_api)
+
+    def _restore_api(self):
+        self._urllib.urlopen = self._orig_urlopen
+        limits.read_oauth_credential = self._orig_cred
+        limits._find_token = self._orig_findtok
+
+    def _serve(self, payload):
+        """Network returns `payload`; every call is recorded."""
+        def fake(req, timeout=None):
+            self.calls.append(req.full_url)
+            return _FakeResponse(payload)
+        self._urllib.urlopen = fake
+
+    def _serve_429(self):
+        import urllib.error
+
+        def fake(req, timeout=None):
+            self.calls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+        self._urllib.urlopen = fake
+
+    def _explode(self):
+        """Any network call at all is a test failure."""
+        def fake(req, timeout=None):
+            raise AssertionError("fetch_api_usage made a network call")
+        self._urllib.urlopen = fake
+
+    def _write_state(self, **state):
+        limits.STATE_PATH.write_text(json.dumps(state))
+
+    def _state(self):
+        return json.loads(limits.STATE_PATH.read_text())
+
+
+class TestApiCache(ApiFetchTestCase):
+    """The usage endpoint is rate limited and we poll it from a 30s dashboard
+    refresh plus every CLI run, so responses are cached on disk."""
+
+    def test_fresh_cache_short_circuits_without_a_network_call(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+        self._explode()
+        out = limits.fetch_api_usage(now=NOW + timedelta(seconds=limits.API_CACHE_SECONDS - 1))
+        self.assertEqual(out, self.RAW)
+
+    def test_expired_cache_refetches(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+        fresh = {"five_hour": {"utilization": 7.0}}
+        self._serve(fresh)
+        out = limits.fetch_api_usage(now=NOW + timedelta(seconds=limits.API_CACHE_SECONDS + 1))
+        self.assertEqual(out, fresh)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_success_rewrites_the_cached_snapshot(self):
+        self._serve(self.RAW)
+        later = NOW + timedelta(hours=1)
+        limits.fetch_api_usage(now=later)
+        st = self._state()
+        self.assertEqual(st["api_raw"], self.RAW)
+        self.assertAlmostEqual(st["api_at"], later.timestamp())
+
+    def test_no_credential_serves_cache_without_calling(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+        limits.read_oauth_credential = lambda *a, **k: None
+        self._explode()
+        out = limits.fetch_api_usage(now=NOW + timedelta(hours=1))
+        self.assertEqual(out, self.RAW)
+
+
+class TestApiBackoff(ApiFetchTestCase):
+    """A 429 must not silently downgrade the UI to a local-only estimate."""
+
+    def test_429_sets_backoff_and_serves_the_last_good_snapshot(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+        self._serve_429()
+        later = NOW + timedelta(seconds=limits.API_CACHE_SECONDS + 1)
+        out = limits.fetch_api_usage(now=later)
+        self.assertEqual(out, self.RAW)  # not None
+        self.assertEqual(len(self.calls), 1)
+        self.assertAlmostEqual(self._state()["api_backoff_until"],
+                               later.timestamp() + limits.API_BACKOFF_SECONDS)
+
+    def test_no_network_call_while_the_backoff_is_in_force(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp(),
+                          api_backoff_until=(NOW + timedelta(hours=2)).timestamp())
+        self._explode()
+        # Cache is stale, but the back-off must still suppress the request.
+        out = limits.fetch_api_usage(now=NOW + timedelta(hours=1))
+        self.assertEqual(out, self.RAW)
+
+    def test_backoff_expires(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp(),
+                          api_backoff_until=(NOW + timedelta(minutes=1)).timestamp())
+        fresh = {"five_hour": {"utilization": 9.0}}
+        self._serve(fresh)
+        out = limits.fetch_api_usage(now=NOW + timedelta(minutes=2))
+        self.assertEqual(out, fresh)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_429_without_a_prior_snapshot_returns_none(self):
+        self._serve_429()
+        self.assertIsNone(limits.fetch_api_usage(now=NOW))
+        self.assertIn("api_backoff_until", self._state())
+
+    def test_success_clears_an_existing_backoff(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp(),
+                          api_backoff_until=(NOW + timedelta(hours=2)).timestamp())
+        self._serve(self.RAW)
+        limits.fetch_api_usage(now=NOW + timedelta(hours=1), force=True)
+        self.assertNotIn("api_backoff_until", self._state())
+
+    def test_non_429_http_error_does_not_set_a_backoff(self):
+        import urllib.error
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+
+        def fake(req, timeout=None):
+            self.calls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+        self._urllib.urlopen = fake
+        out = limits.fetch_api_usage(now=NOW + timedelta(hours=1))
+        self.assertEqual(out, self.RAW)
+        self.assertNotIn("api_backoff_until", self._state())
+
+
+class TestApiForce(ApiFetchTestCase):
+    def test_force_bypasses_a_fresh_cache(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+        fresh = {"five_hour": {"utilization": 11.0}}
+        self._serve(fresh)
+        out = limits.fetch_api_usage(now=NOW, force=True)
+        self.assertEqual(out, fresh)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_force_bypasses_the_backoff(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp(),
+                          api_backoff_until=(NOW + timedelta(hours=2)).timestamp())
+        fresh = {"five_hour": {"utilization": 13.0}}
+        self._serve(fresh)
+        out = limits.fetch_api_usage(now=NOW + timedelta(minutes=1), force=True)
+        self.assertEqual(out, fresh)
+        self.assertEqual(len(self.calls), 1)
+
+
+class TestKnownSublimits(ApiComputeTestCase):
+    """Which per-model weekly rows exist is a property of the *plan*, learned
+    from the API — not something to guess from "are there Opus turns in the DB".
+    Guessing fabricates a row that can never have a percentage, so it renders as
+    a permanent 'n/a' next to a reset countdown."""
+
+    OPUS_ROWS = [(NOW - timedelta(days=1), "claude-opus-4-8", 1000, 2000, 0, 0)]
+
+    def _set_known(self, opus, sonnet):
+        cfg = limits.load_config()
+        cfg["known_sublimits"] = {"weekly_opus": opus, "weekly_sonnet": sonnet}
+        limits.save_config(cfg)
+
+    def test_api_records_the_sublimit_structure(self):
+        db = _make_db(self.OPUS_ROWS)
+        self._use_api({
+            "five_hour": {"utilization": 20.0},
+            "seven_day": {"utilization": 30.0},
+            "seven_day_opus": {"utilization": 40.0},
+            "seven_day_sonnet": None,
+        })
+        limits.compute(db_path=db, now=NOW)
+        self.assertEqual(limits.load_config()["known_sublimits"],
+                         {"weekly_opus": True, "weekly_sonnet": False})
+
+    def test_live_response_without_per_model_keys_records_absence(self):
+        db = _make_db(self.OPUS_ROWS)
+        self._use_api(LIVE_RAW)
+        data = limits.compute(db_path=db, now=NOW)
+        self.assertIsNone(data["weekly_opus"])
+        self.assertEqual(limits.load_config()["known_sublimits"],
+                         {"weekly_opus": False, "weekly_sonnet": False})
+
+    def test_outage_does_not_resurrect_an_absent_opus_row(self):
+        # The user-visible bug: a DB full of Opus turns on an account whose API
+        # reported no separate Opus cap must still not draw a Weekly-Opus row.
+        db = _make_db(self.OPUS_ROWS)
+        self._set_known(opus=False, sonnet=False)
+        data = limits.compute(db_path=db, use_api=False, now=NOW)
+        self.assertGreater(data["weekly_all"]["turns"], 0)
+        self.assertIsNone(data["weekly_opus"])
+        self.assertIsNone(data["weekly_sonnet"])
+
+    def test_outage_keeps_a_row_the_api_did_confirm(self):
+        db = _make_db(self.OPUS_ROWS)
+        self._set_known(opus=True, sonnet=False)
+        data = limits.compute(db_path=db, use_api=False, now=NOW)
+        self.assertIsNotNone(data["weekly_opus"])
+        self.assertEqual(data["weekly_opus"]["turns"], 1)
+        self.assertIsNone(data["weekly_sonnet"])
+
+    def test_confirmed_row_survives_even_with_no_matching_turns(self):
+        db = _make_db([(NOW - timedelta(days=1), "claude-sonnet-4-6", 100, 100, 0, 0)])
+        self._set_known(opus=True, sonnet=True)
+        data = limits.compute(db_path=db, use_api=False, now=NOW)
+        self.assertIsNotNone(data["weekly_opus"])
+        self.assertEqual(data["weekly_opus"]["turns"], 0)
+
+    def test_without_known_sublimits_the_turn_heuristic_applies(self):
+        db = _make_db(self.OPUS_ROWS)
+        self.assertEqual(limits.load_config()["known_sublimits"], {})
+        data = limits.compute(db_path=db, use_api=False, now=NOW)
+        self.assertIsNotNone(data["weekly_opus"])   # opus turns exist
+        self.assertIsNone(data["weekly_sonnet"])    # none do
+
+
+class TestPlanLabel(TempConfigTestCase):
+    def test_subscription_label_from_rate_limit_tier(self):
+        self.assertEqual(limits.subscription_label(
+            {"claudeAiOauth": {"rateLimitTier": "default_claude_max_20x"}}), "Max (20x)")
+        self.assertEqual(limits.subscription_label(
+            {"claudeAiOauth": {"rateLimitTier": "default_claude_max_5x"}}), "Max (5x)")
+
+    def test_subscription_label_falls_back_to_subscription_type(self):
+        self.assertEqual(limits.subscription_label(
+            {"claudeAiOauth": {"subscriptionType": "pro"}}), "Pro")
+        self.assertIsNone(limits.subscription_label({"claudeAiOauth": {}}))
+        self.assertIsNone(limits.subscription_label(None))
+
+
+class TestPlanOverride(ApiComputeTestCase):
+    """The keychain records the tier as of token issue, so it goes stale after a
+    plan change; an explicit override has to win — without destroying the
+    knowledge of what the real tier is."""
+
+    ROWS = [(NOW - timedelta(minutes=15), "claude-opus-4-8", 1000, 2000, 0, 0)]
+    CRED_5X = {"claudeAiOauth": {"accessToken": "tok",
+                                 "rateLimitTier": "default_claude_max_5x"}}
+    RAW = {"five_hour": {"utilization": 20.0}, "seven_day": {"utilization": 30.0}}
+
+    def test_derived_label_is_used_when_no_override(self):
+        db = _make_db(self.ROWS)
+        self._use_api(self.RAW, cred=self.CRED_5X)
+        self.assertEqual(limits.compute(db_path=db, now=NOW)["plan"], "Max (5x)")
+
+    def test_override_wins_over_the_derived_label(self):
+        db = _make_db(self.ROWS)
+        cfg = limits.load_config()
+        cfg["plan_override"] = "Max (20x)"
+        limits.save_config(cfg)
+        self._use_api(self.RAW, cred=self.CRED_5X)
+        self.assertEqual(limits.compute(db_path=db, now=NOW)["plan"], "Max (20x)")
+
+    def test_clearing_the_override_falls_back_to_the_real_tier(self):
+        db = _make_db(self.ROWS)
+        cfg = limits.load_config()
+        cfg["plan_override"] = "Max (20x)"
+        limits.save_config(cfg)
+        self._use_api(self.RAW, cred=self.CRED_5X)
+        limits.compute(db_path=db, now=NOW)
+        # The *derived* label is what gets cached — caching the override would
+        # make clearing it fall back to the override itself.
+        cfg = limits.load_config()
+        self.assertEqual(cfg["plan"], "Max (5x)")
+        cfg["plan_override"] = None
+        limits.save_config(cfg)
+        self.assertEqual(limits.compute(db_path=db, now=NOW)["plan"], "Max (5x)")
 
 
 if __name__ == "__main__":
