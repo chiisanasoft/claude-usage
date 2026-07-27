@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Plan limits
+
+- Add `limits.py` and a `python cli.py limits` command: Claude-desktop-style indicators for the current 5-hour session window and the weekly window (all models, plus Opus / Sonnet sub-limits when the plan has them), with consumption in API-equivalent dollars, turn counts and reset countdowns
+- Read the exact percentages and reset times from the read-only `/api/oauth/usage` endpoint using the OAuth token Claude Code already stored, and auto-calibrate the local caps from them so estimates stay accurate when the API is unavailable
+- Add manual calibration against the desktop Usage screen (`--calibrate-session/-weekly/-opus/-sonnet N`) and a fixed weekly reset anchor (`--weekly-reset DOW HOUR`), persisted in `~/.claude/claude-usage-limits.json`
+- Add `--no-api`, `--no-scan`, `--json` and a token-free `--debug-api` diagnostic to the `limits` command
+- Add a `GET /api/limits` endpoint and a "Plan Limits" bar card at the top of the dashboard, refreshed every 30 seconds
+- Reuse `cli.calc_cost` for limit consumption so pricing stays single-sourced
+
 ## v1.1.0 — 2026-05-28
 
 ### Dashboard

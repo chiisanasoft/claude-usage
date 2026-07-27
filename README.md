@@ -71,6 +71,9 @@ python cli.py week
 # Show all-time statistics (in terminal)
 python cli.py stats
 
+# Show the current 5-hour session + weekly limit indicators
+python cli.py limits
+
 # Scan + open browser dashboard at http://localhost:8080
 python cli.py dashboard
 
@@ -84,6 +87,52 @@ python cli.py scan --projects-dir /path/to/transcripts
 The scanner is incremental — it tracks each file's path and modification time, so re-running `scan` is fast and only processes new or changed files.
 
 By default, the scanner checks both `~/.claude/projects/` and the Xcode Claude integration directory (`~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/projects/`), skipping any that don't exist. Use `--projects-dir` to scan a custom location instead.
+
+---
+
+## Plan limits (`limits`)
+
+`python cli.py limits` reproduces the Claude desktop app's **Usage** screen in your terminal:
+
+- **Current session (5h)** — the rolling 5-hour window containing your latest activity. Shows the dollar-equivalent consumed, the number of turns, a percentage bar and a "resets in" countdown.
+- **Weekly — all models** — the 7-day window, same figures.
+- **Weekly — Opus / Sonnet** — optional per-model rows, shown only when your plan actually has a separate sub-limit for that model (or, without the API, when there is local usage for it).
+
+The percentage needs a cap that Anthropic doesn't publish and that isn't in the local logs, so it comes from one of three sources, in order of preference:
+
+1. **Live API** — the same read-only `/api/oauth/usage` endpoint the desktop app and `claude /usage` use, authenticated with the OAuth token Claude Code already stored (macOS keychain). It costs nothing and consumes no rate limit. Percentages and reset times then match the desktop app exactly, and the caps are auto-calibrated in the background so estimates stay good later.
+2. **Calibrated** — you tell it once what the desktop app shows (`--calibrate-session 20`) and the cap is backed out of your current consumption.
+3. **Uncalibrated** — no cap known. Consumption and the reset countdown are still shown; the bar reads `—`.
+
+```
+# Session + weekly indicators (runs an incremental scan first)
+python cli.py limits
+
+# Skip the API and use only local data / calibration
+python cli.py limits --no-api
+
+# Raw JSON payload (same shape the dashboard consumes)
+python cli.py limits --json
+
+# Skip the incremental scan (faster, but may miss very recent turns)
+python cli.py limits --no-scan
+
+# Calibrate a window against a percentage you read in the desktop app
+python cli.py limits --calibrate-session 20
+python cli.py limits --calibrate-weekly 40
+python cli.py limits --calibrate-opus 15
+python cli.py limits --calibrate-sonnet 35
+
+# Anchor the weekly window to a fixed reset (DOW 0=Mon..6=Sun, local hour 0-23)
+python cli.py limits --weekly-reset 3 11
+
+# Diagnose the usage API (prints status, plan and hints — never your token)
+python cli.py limits --debug-api
+```
+
+Settings persist in `~/.claude/claude-usage-limits.json` — detected plan, the caps for each window (with the time they were calibrated), the weekly reset anchor, and a `use_api` flag you can set to `false` to disable API calls permanently. Without a reset anchor the weekly window is a rolling 7 days.
+
+The dashboard shows the same bars in a **Plan Limits** card at the top of the page, served by `GET /api/limits` and refreshed every 30 seconds.
 
 ---
 
@@ -125,4 +174,5 @@ Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.c
 |------|---------|
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
-| `cli.py` | `scan`, `today`, `stats`, `dashboard` commands |
+| `cli.py` | `scan`, `today`, `week`, `stats`, `limits`, `dashboard` commands |
+| `limits.py` | Session (5h) + weekly limit indicators, calibration, read-only usage API |
