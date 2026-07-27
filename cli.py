@@ -385,6 +385,9 @@ def _render_limit_block(b):
     line = f"  {b['label']:<26} {_bar(pct)} {pct_str}"
     if b["resets_in"]:
         line += f"   resets in {b['resets_in']}"
+    sev = (b.get("severity") or "").lower()
+    if sev and sev != "normal":
+        line += f"   [{sev}]"
     print(line)
     detail = f"      ${b['consumption_usd']:.2f} used  ·  {b['turns']} turns"
     if b["source"] == "uncalibrated":
@@ -472,6 +475,10 @@ def cmd_limits(args=None):
         _render_limit_block(data["weekly_opus"])
     if data.get("weekly_sonnet"):
         _render_limit_block(data["weekly_sonnet"])
+    # Scoped (per-model / per-surface) limits the API reports generically. These
+    # are real limits that can be near their cap, so they must never be hidden.
+    for block in data.get("weekly_scoped") or []:
+        _render_limit_block(block)
     hr()
     if not data["api_ok"]:
         any_uncal = any(data[w]["source"] == "uncalibrated"
