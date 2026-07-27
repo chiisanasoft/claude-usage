@@ -1229,7 +1229,13 @@ async function triggerRescan() {
 }
 
 // ── Plan limits (session / weekly indicators) ───────────────────────────────
-function limitFillClass(pct) {
+// The API classifies each limit itself (normal/warning/critical). Trust that
+// when it is present — it knows about thresholds we can only guess at — and
+// fall back to percentage bands only for locally-estimated rows.
+function limitFillClass(pct, severity) {
+  if (severity === 'critical') return 'danger';
+  if (severity === 'warning') return 'warn';
+  if (severity === 'normal') return '';
   if (pct === null || pct === undefined) return '';
   if (pct >= 90) return 'danger';
   if (pct >= 70) return 'warn';
@@ -1241,7 +1247,10 @@ function renderLimitRow(b, isSub) {
   const width = hasPct ? Math.min(100, pct) : 0;
   const pctText = hasPct ? Math.round(pct) + '%' : '—';
   const reset = b.resets_in ? '<span class="reset">resets in ' + esc(b.resets_in) + '</span>' : '';
-  const used = '$' + (b.consumption_usd || 0).toFixed(2) + ' · ' + (b.turns || 0) + ' turns';
+  // cost_known === false means every turn in the window ran on a model with no
+  // pricing entry. Showing "$0.00" there would read as "this was free".
+  const used = (b.cost_known === false ? 'n/a' : '$' + (b.consumption_usd || 0).toFixed(2)) +
+    ' · ' + (b.turns || 0) + ' turns';
   return '' +
     '<div class="limit-row' + (isSub ? ' sub' : '') + '">' +
       '<div class="limit-line">' +
@@ -1251,7 +1260,7 @@ function renderLimitRow(b, isSub) {
           '<span class="limit-pct' + (hasPct ? '' : ' na') + '">' + pctText + '</span>' +
         '</div>' +
       '</div>' +
-      '<div class="limit-track"><div class="limit-fill ' + limitFillClass(pct) +
+      '<div class="limit-track"><div class="limit-fill ' + limitFillClass(pct, b.severity) +
         '" style="width:' + width + '%"></div></div>' +
     '</div>';
 }
@@ -1266,8 +1275,17 @@ function renderLimits(d) {
     : 'Source: <span class="est">local estimate</span> · updated ' + esc(d.generated_at);
   let rows = renderLimitRow(d.session, false);
   rows += renderLimitRow(d.weekly_all, false);
-  if (d.weekly_opus) rows += renderLimitRow(d.weekly_opus, true);
-  if (d.weekly_sonnet) rows += renderLimitRow(d.weekly_sonnet, true);
+  // Per-model weekly sub-limits. The API's `limits` array is authoritative and
+  // names the models itself, so iterate it generically — hardcoding Opus and
+  // Sonnet is what hid a warning-level Fable limit entirely. The legacy pair is
+  // only a fallback for responses that carry no scoped entries.
+  const scoped = d.weekly_scoped || [];
+  if (scoped.length) {
+    scoped.forEach(function(b) { rows += renderLimitRow(b, true); });
+  } else {
+    if (d.weekly_opus) rows += renderLimitRow(d.weekly_opus, true);
+    if (d.weekly_sonnet) rows += renderLimitRow(d.weekly_sonnet, true);
+  }
   document.getElementById('limits-rows').innerHTML = rows;
   const tip = document.getElementById('limits-tip');
   const uncal = !d.api_ok &&
