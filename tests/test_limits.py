@@ -39,7 +39,39 @@ def _make_db(rows):
     return path
 
 
-class TestSessionWindow(unittest.TestCase):
+_REAL_CONFIG_PATH = limits.CONFIG_PATH
+_MODULE_TMPDIR = None
+
+
+def setUpModule():
+    """Safety net: no test in this module may read or write the user's real
+    ~/.claude/claude-usage-limits.json (see AGENTS.md)."""
+    global _MODULE_TMPDIR
+    _MODULE_TMPDIR = tempfile.TemporaryDirectory()
+    limits.CONFIG_PATH = Path(_MODULE_TMPDIR.name) / "module-limits.json"
+
+
+def tearDownModule():
+    limits.CONFIG_PATH = _REAL_CONFIG_PATH
+    if _MODULE_TMPDIR is not None:
+        _MODULE_TMPDIR.cleanup()
+
+
+class TempConfigTestCase(unittest.TestCase):
+    """Base class giving every test its own absent-at-start config file."""
+
+    def setUp(self):
+        self._orig_cfg = limits.CONFIG_PATH
+        self._cfg_dir = tempfile.TemporaryDirectory()
+        limits.CONFIG_PATH = Path(self._cfg_dir.name) / "limits.json"
+        self.assertNotEqual(limits.CONFIG_PATH, _REAL_CONFIG_PATH)
+
+    def tearDown(self):
+        limits.CONFIG_PATH = self._orig_cfg
+        self._cfg_dir.cleanup()
+
+
+class TestSessionWindow(TempConfigTestCase):
     def test_block_start_and_consumption(self):
         rows = [
             (NOW - timedelta(hours=9), "claude-opus-4-8", 100, 100, 0, 0),   # 03:00 old block
@@ -71,7 +103,7 @@ class TestSessionWindow(unittest.TestCase):
         self.assertIsNone(s["reset_at"])
 
 
-class TestWeeklyWindow(unittest.TestCase):
+class TestWeeklyWindow(TempConfigTestCase):
     def test_rolling_seven_days(self):
         rows = [
             (NOW - timedelta(days=2), "claude-opus-4-8", 1000, 1000, 0, 0),   # in window
@@ -87,23 +119,11 @@ class TestWeeklyWindow(unittest.TestCase):
         self.assertEqual(data["weekly_sonnet"]["turns"], 1)
 
 
-class TestCalibration(unittest.TestCase):
-    def setUp(self):
-        self._orig_cfg = limits.CONFIG_PATH
-        fd = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        fd.close()
-        limits.CONFIG_PATH = Path(fd.name)
-        limits.CONFIG_PATH.unlink()  # start absent
-
-    def tearDown(self):
-        if limits.CONFIG_PATH.exists():
-            limits.CONFIG_PATH.unlink()
-        limits.CONFIG_PATH = self._orig_cfg
-
+class TestCalibration(TempConfigTestCase):
     def test_calibrate_sets_cap_and_pct(self):
         rows = [(NOW - timedelta(minutes=30), "claude-opus-4-8", 1000, 2000, 100, 50)]
         db = _make_db(rows)
-        cap, cost = limits.calibrate("session", 20.0, db_path=db)
+        cap, cost = limits.calibrate("session", 20.0, db_path=db, now=NOW)
         self.assertAlmostEqual(cap, round(cost / 0.20, 4), places=3)
         # After calibration, compute (no api) should show ~20%.
         data = limits.compute(db_path=db, use_api=False, now=NOW)
@@ -120,7 +140,7 @@ class TestCalibration(unittest.TestCase):
         self.assertIn("weekly_opus", again)
 
 
-class TestApiParser(unittest.TestCase):
+class TestApiParser(TempConfigTestCase):
     def test_parse_fraction_and_reset(self):
         raw = {
             "five_hour": {"utilization": 0.2, "resets_at": "2026-06-27T15:00:00Z"},

@@ -591,10 +591,11 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
     }
 
 
-def calibrate(window_name, observed_pct, db_path=DB_PATH):
+def calibrate(window_name, observed_pct, db_path=DB_PATH, now=None):
     """Set the cap for a window from an observed desktop percentage.
-    window_name in {session, weekly_all, weekly_opus, weekly_sonnet}."""
-    data = compute(db_path=db_path, use_api=False)
+    window_name in {session, weekly_all, weekly_opus, weekly_sonnet}.
+    `now` overrides wall-clock time (used by tests)."""
+    data = compute(db_path=db_path, use_api=False, now=now)
     if "error" in data:
         raise RuntimeError(data["error"])
     if window_name not in data:
@@ -605,6 +606,6 @@ def calibrate(window_name, observed_pct, db_path=DB_PATH):
     cap = round(cost / (observed_pct / 100.0), 4)
     cfg = load_config()
     cfg[window_name]["cap_usd"] = cap
-    cfg[window_name]["calibrated_at"] = _iso_z(_now_utc())
+    cfg[window_name]["calibrated_at"] = _iso_z(now or _now_utc())
     save_config(cfg)
     return cap, cost
