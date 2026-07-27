@@ -130,6 +130,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Code Usage Dashboard</title>
+<!-- Favicon as an inline data URI: three stacked bars in the same blue/red/
+     amber the limit indicators use, so the browser tab reads as "usage bars"
+     at 16px. Inline keeps the dashboard a single self-contained file (and
+     stops the browser's automatic /favicon.ico request 404-ing). -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23181b20'/%3E%3Crect x='6' y='8' width='20' height='4.5' rx='2.25' fill='%233b82f6'/%3E%3Crect x='6' y='15.5' width='14' height='4.5' rx='2.25' fill='%23ef4444'/%3E%3Crect x='6' y='23' width='9' height='4.5' rx='2.25' fill='%23eab308'/%3E%3C/svg%3E">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   :root {
@@ -229,9 +234,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .limits-src .est { color: #eab308; }
   .limit-row { margin-bottom: 16px; }
   .limit-row:last-child { margin-bottom: 0; }
-  .limit-row.sub { margin-left: 18px; }
+  /* Sub-limit rows are indented on the LABEL only. Indenting the whole row
+     shifted its track too, so bars no longer shared a left edge or a width and
+     could not be compared by eye — which is the entire point of the card. */
+  .limit-row.sub .limit-name { padding-left: 15px; }
+  .limit-row.sub .limit-name::before { content: '\21b3'; position: absolute; left: 0; color: var(--muted); font-weight: 400; }
   .limit-line { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; gap: 12px; }
-  .limit-name { color: var(--text); font-weight: 500; font-size: 13px; }
+  .limit-name { position: relative; color: var(--text); font-weight: 500; font-size: 13px; }
   .limit-name .reset { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 8px; }
   .limit-right { display: flex; align-items: baseline; gap: 12px; white-space: nowrap; }
   .limit-used { color: var(--muted); font-size: 11px; font-family: monospace; }
