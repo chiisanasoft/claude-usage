@@ -119,6 +119,16 @@ Key points:
 
 The entire UI lives in `HTML_TEMPLATE` as a raw string. Chart.js is loaded from CDN.
 
+### Container deployment
+
+A container deployment of the dashboard exists: [Dockerfile](Dockerfile), [docker-compose.yml](docker-compose.yml), documented in [docs/DOCKER.md](docs/DOCKER.md). It is packaging only — no application code is involved, and it must stay that way. Constraints worth knowing before you change anything it depends on:
+
+- **No path configuration exists.** `DB_PATH` is a module-level `Path.home() / ".claude" / "usage.db"` in `scanner.py` / `cli.py` / `dashboard.py` / `limits.py`, with no env var or flag (only `scan --projects-dir` is overridable, and `cmd_dashboard` doesn't take a projects dir on the server side). The container therefore configures paths purely by setting `HOME=/home/appuser` and bind-mounting onto the paths the code already hardcodes. If you ever add a `CLAUDE_USAGE_DB` env var, update the compose file to use it.
+- **`HOST` / `PORT` env vars are the only network knobs** (`serve()` in [dashboard.py](dashboard.py), `cmd_dashboard` in [cli.py](cli.py)). The image sets `HOST=0.0.0.0` — mandatory inside a container — and compose publishes to `127.0.0.1:8080` so the unauthenticated UI is not exposed to the LAN. Don't change the default `localhost` bind in the app; the container overrides it deliberately.
+- **Transcripts are mounted read-only**; the only writable mount is a named volume at `/home/appuser/.claude` holding the derived `usage.db` and `claude-usage-limits.json`. The scanner must keep treating the projects dirs as strictly read-only.
+- **The live limits API cannot work there.** `read_oauth_credential()` shells out to the macOS `security` binary; in a Linux container that raises and is swallowed, so `/api/limits` degrades to calibrated/uncalibrated. That graceful degradation (exception-swallowing in `read_oauth_credential` / `fetch_api_usage`) is load-bearing for the container — keep it. Do not add any code that extracts, forwards or persists the OAuth token for container use.
+- The CMD is `python cli.py dashboard`, which scans then serves; its `webbrowser.open` call is a harmless no-op in the container.
+
 ## Testing notes
 
 - `tests/test_scanner.py` and `tests/test_dashboard.py` use `tempfile.NamedTemporaryFile` for an isolated DB; never touch the user's real `~/.claude/usage.db`.

@@ -1,0 +1,41 @@
+# Claude Code Usage Dashboard — local container deployment.
+#   docker compose up -d --build     # start
+#   docker compose down              # stop (add -v to also drop the database)
+# Full notes, including the macOS-keychain limitation: docs/DOCKER.md
+
+services:
+  dashboard:
+    build: .
+    image: claude-usage:latest
+    container_name: claude-usage-dashboard
+    # Published on the loopback interface only: the dashboard has no
+    # authentication and shows your full usage history, so it must not be
+    # reachable from the local network. Drop "127.0.0.1:" at your own risk.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # The app resolves every path from $HOME, so the mounts below land where
+      # scanner.py / dashboard.py / limits.py already look. HOST is baked into
+      # the image but repeated here so it is visible where the port is.
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      # Rendering of times in the UI; set to your own zone.
+      TZ: "${TZ:-UTC}"
+    volumes:
+      # Transcripts: READ-ONLY. The container parses them and must never be
+      # able to modify or truncate the real Claude Code logs.
+      - "${HOME}/.claude/projects:/home/appuser/.claude/projects:ro"
+      # Derived state (usage.db + claude-usage-limits.json): a named volume, so
+      # the container's writes never touch the host ~/.claude directory. The DB
+      # is fully rebuildable from the transcripts, so losing it costs a rescan.
+      # To share the host's existing DB instead, replace this line with:
+      #   - "${HOME}/.claude:/home/appuser/.claude"
+      # and delete it — but then the container writes into your real ~/.claude.
+      - "claude-usage-db:/home/appuser/.claude"
+      # Optional: the Xcode coding-assistant transcripts (macOS only). Uncomment
+      # if you use Claude in Xcode; the path is skipped when it does not exist.
+      # - "${HOME}/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/projects:/home/appuser/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/projects:ro"
+    restart: unless-stopped
+
+volumes:
+  claude-usage-db:

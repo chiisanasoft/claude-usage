@@ -90,6 +90,25 @@ By default, the scanner checks both `~/.claude/projects/` and the Xcode Claude i
 
 ---
 
+## Run in Docker
+
+The dashboard can also run in a container — slim official Python base, no
+dependencies to install, non-root user:
+
+```
+docker compose up -d --build     # then open http://127.0.0.1:8080
+docker compose down              # stop (add -v to drop the database volume)
+```
+
+Your transcripts are mounted **read-only**, the derived SQLite DB lives in a
+named volume, and the port is published to `127.0.0.1` only (the dashboard has
+no authentication). One caveat: the live limits API reads an OAuth token from
+the macOS keychain, which a Linux container cannot do, so the Plan Limits card
+falls back to local/calibrated estimates — run the dashboard natively for live
+percentages. Full details: **[docs/DOCKER.md](docs/DOCKER.md)**.
+
+---
+
 ## Plan limits (`limits`)
 
 `python cli.py limits` reproduces the Claude desktop app's **Usage** screen in your terminal:

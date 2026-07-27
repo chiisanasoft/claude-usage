@@ -1,0 +1,16 @@
+# Only the four .py files are COPYed, but keeping the build context small
+# keeps builds fast and avoids ever shipping local data into an image.
+.git
+.github
+__pycache__
+**/__pycache__
+*.pyc
+tests
+docs
+*.md
+LICENSE
+.gitignore
+server.log
+*.db
+*.jsonl
+.pr-candidates.md
