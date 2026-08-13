@@ -10,6 +10,8 @@
 - Add `--no-api`, `--no-scan`, `--json` and a token-free `--debug-api` diagnostic to the `limits` command
 - Add a `GET /api/limits` endpoint and a "Plan Limits" bar card at the top of the dashboard, refreshed every 30 seconds
 - Reuse `cli.calc_cost` for limit consumption so pricing stays single-sourced
+- Fix the Plan Limits card showing nothing in the Docker container: the named volume shadowed the host's `~/.claude`, so the calibrated caps and plan label never reached it. Both settings files are now bind-mounted read-only
+- Stop serving a cached API snapshot as if it were live once it is older than `API_SNAPSHOT_MAX_AGE_SECONDS`; a container that cannot refresh it now falls through to the calibrated tier instead of freezing at the host's last reading
 
 ## v1.1.0 — 2026-05-28
 

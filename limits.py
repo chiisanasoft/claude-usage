@@ -49,6 +49,15 @@ STATE_PATH = Path.home() / ".claude" / "claude-usage-limits-state.json"
 # snapshot inside this window, and stay quiet for a while after a 429.
 API_CACHE_SECONDS = 120
 API_BACKOFF_SECONDS = 600
+# Hard age limit for serving the cached snapshot as a *fallback* (no credential,
+# failed request). Inside the back-off window we knowingly reuse a snapshot up to
+# API_BACKOFF_SECONDS old, so that is the oldest reading this tool ever presents
+# as live on a healthy host; anything older means we are not talking to the API
+# at all. That case is real: the state file can be mounted read-only into a
+# container (see docs/DOCKER.md), where it never refreshes and would otherwise be
+# rendered as "live from API" days later. Falling back to the calibrated tier is
+# honest; a stale percentage labelled live is not.
+API_SNAPSHOT_MAX_AGE_SECONDS = 600
 
 SESSION_HOURS = 5
 WEEK_DAYS = 7
@@ -364,6 +373,18 @@ def _write_state(state):
         pass
 
 
+def _fallback_snapshot(cached, cached_at, now_ts):
+    """The cached snapshot, but only while it is young enough to stand in for a
+    live reading (see API_SNAPSHOT_MAX_AGE_SECONDS). Returning None instead lets
+    compute() drop to the calibrated tier rather than present a days-old
+    percentage as if it came from the API just now."""
+    if not cached:
+        return None
+    if now_ts - (cached_at or 0) > API_SNAPSHOT_MAX_AGE_SECONDS:
+        return None
+    return cached
+
+
 def fetch_api_usage(timeout=10, now=None, force=False):
     """Call the read-only usage endpoint. Returns the raw parsed JSON dict on
     success, or None.
@@ -374,6 +395,10 @@ def fetch_api_usage(timeout=10, now=None, force=False):
     every 30 seconds *and* from every CLI invocation. So responses are cached on
     disk for API_CACHE_SECONDS and a 429 triggers a back-off window during which
     we serve the last good snapshot instead of hammering the endpoint.
+
+    When the endpoint cannot be reached at all (no credential, network error) the
+    snapshot is only served while it is younger than API_SNAPSHOT_MAX_AGE_SECONDS
+    — an old snapshot must not be dressed up as a live reading.
     """
     now_ts = (now or _now_utc()).timestamp()
     state = _read_state()
@@ -388,10 +413,10 @@ def fetch_api_usage(timeout=10, now=None, force=False):
 
     cred = read_oauth_credential()
     if not cred:
-        return cached
+        return _fallback_snapshot(cached, cached_at, now_ts)
     token = _find_token(cred)
     if not token:
-        return cached
+        return _fallback_snapshot(cached, cached_at, now_ts)
 
     import urllib.request
     import urllib.error
@@ -409,10 +434,11 @@ def fetch_api_usage(timeout=10, now=None, force=False):
             state["api_backoff_until"] = now_ts + API_BACKOFF_SECONDS
             _write_state(state)
         # Serve the last good snapshot rather than silently dropping to a
-        # local-only estimate the moment one request is throttled.
-        return cached
+        # local-only estimate the moment one request is throttled — but only
+        # while that snapshot is still recent enough to mean anything.
+        return _fallback_snapshot(cached, cached_at, now_ts)
     except Exception:
-        return cached
+        return _fallback_snapshot(cached, cached_at, now_ts)
 
 
 def debug_api_probe(timeout=15):
@@ -718,7 +744,9 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
     if use_api:
         cred = read_oauth_credential()
         derived_plan = subscription_label(cred) or derived_plan
-        raw = fetch_api_usage()
+        # `now` is threaded through so the cache/staleness clocks follow the
+        # injected time in tests instead of the wall clock.
+        raw = fetch_api_usage(now=now)
         if raw is not None:
             api = parse_api_usage(raw)
             api_ok = bool(api)

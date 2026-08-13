@@ -8,8 +8,10 @@ The container runs as a **non-root** user (`appuser`, uid 10001) and needs two
 things from the host: your Claude Code transcripts (read-only) and somewhere
 writable to keep the SQLite database it derives from them.
 
-> **Known limitation:** the live plan-limits API does **not** work in a
-> container. See [Plan limits](#plan-limits-in-a-container) below.
+> **Known limitation:** the container cannot poll the live plan-limits API (no
+> macOS keychain). It reads your calibrated caps and plan label from the host,
+> so the Plan Limits card still shows percentages — just estimated ones. See
+> [Plan limits](#plan-limits-in-a-container) below.
 
 ---
 
@@ -40,8 +42,14 @@ docker run -d \
   -p 127.0.0.1:8080:8080 \
   -v "$HOME/.claude/projects:/home/appuser/.claude/projects:ro" \
   -v claude-usage-db:/home/appuser/.claude \
+  -v "$HOME/.claude/claude-usage-limits.json:/home/appuser/.claude/claude-usage-limits.json:ro" \
+  -v "$HOME/.claude/claude-usage-limits-state.json:/home/appuser/.claude/claude-usage-limits-state.json:ro" \
   claude-usage:latest
 ```
+
+The last two mounts are what makes the Plan Limits card show numbers; run
+`python3 cli.py limits` natively once first, or Docker will create *directories*
+where those files should be (see [Plan limits](#plan-limits-in-a-container)).
 
 Tear down:
 
@@ -71,7 +79,9 @@ the mounts have to land on the paths the code already looks at.
 | Host path | Container path | Mode | Why |
 |---|---|---|---|
 | `~/.claude/projects` | `/home/appuser/.claude/projects` | **read-only** | The JSONL transcripts. Mounted `:ro` so the container can never modify or truncate your real Claude Code logs. |
-| named volume `claude-usage-db` | `/home/appuser/.claude` | read-write | Where `usage.db` and `claude-usage-limits.json` are written. |
+| named volume `claude-usage-db` | `/home/appuser/.claude` | read-write | Where `usage.db` is written. |
+| `~/.claude/claude-usage-limits.json` | same path under `/home/appuser` | **read-only** | Plan-limits settings: calibrated caps, plan label, which weekly sub-limits your account has. Without it the card has no denominator and every bar reads `—`. |
+| `~/.claude/claude-usage-limits-state.json` | same path under `/home/appuser` | **read-only** | The last usage-API snapshot the host fetched. Used only while it is fresh (see below). |
 | `~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/projects` | same path under `/home/appuser` | read-only | *Optional*, macOS only. Commented out in `docker-compose.yml`; uncomment if you use Claude in Xcode. Missing directories are skipped silently. |
 
 **Why a named volume for the database, not a bind mount into `~/.claude`?**
@@ -133,15 +143,32 @@ The failure is graceful, not fatal: `read_oauth_credential()` returns `None`,
 `/api/limits` responds with `"api_ok": false`, and the Plan Limits card falls
 back to the other two cap sources:
 
-1. **Calibrated** — if `cap_usd` values exist in
-   `claude-usage-limits.json` on the writable volume, percentages are estimated
-   from them.
-2. **Uncalibrated** — otherwise the card still shows dollar-equivalent
-   consumption, turn counts and the reset countdown, but the bars read `—`.
+1. **Calibrated** — the caps the *host* derived, read from the read-only
+   `claude-usage-limits.json` mount. Percentages are estimated against them, and
+   the plan label (`Max (20x)`, …) comes from the same file. This is the normal
+   case, and it is why the compose file mounts that file at all: a container
+   with only a fresh named volume has no caps, so every bar renders `—`.
+2. **Uncalibrated** — no config file (or no `cap_usd` in it): the card still
+   shows dollar-equivalent consumption, turn counts and the reset countdown,
+   but the bars read `—`.
 
 Consumption, turns and reset times are computed entirely from the local
-transcripts, so those remain correct in the container. Only the *exact
-percentages and caps* need the API.
+transcripts, so those remain correct in the container. Only the *exact*
+percentages need the API; the calibrated ones drift as your caps age.
+
+`claude-usage-limits-state.json` — the last API snapshot the host fetched — is
+mounted read-only too, so a container started right after a native run serves
+the real API percentages for a few minutes. It is deliberately **not** trusted
+beyond `limits.API_SNAPSHOT_MAX_AGE_SECONDS` (10 minutes): the container can
+never refresh it, and a week-old percentage presented as "live from API" is
+worse than an honest estimate. Past that age the card silently drops to the
+calibrated tier.
+
+> **Docker gotcha:** bind-mounting a file that does not exist on the host makes
+> Docker create a **directory** at that path, and the container then reads
+> nothing. Run `python3 cli.py limits` natively once — it writes both files —
+> before `docker compose up`. If you hit this already, `docker compose down -v`
+> and start again.
 
 **To get live percentages, run the dashboard natively** on your Mac:
 
@@ -149,17 +176,14 @@ percentages and caps* need the API.
 python3 cli.py dashboard        # or: claude-usage dashboard
 ```
 
-You can also seed the container with calibrated caps: run
-`python3 cli.py limits --calibrate-session 20` natively (or read the
-percentages off the desktop app), then copy the resulting
-`~/.claude/claude-usage-limits.json` into the volume:
-
-```
-docker cp ~/.claude/claude-usage-limits.json claude-usage-dashboard:/home/appuser/.claude/
-```
+To improve the container's estimates, recalibrate on the host — run
+`python3 cli.py limits` natively (it auto-calibrates from the live API), or
+`python3 cli.py limits --calibrate-session 20` from a percentage you read off
+the desktop app. The container picks the new caps up on its next refresh; it
+never writes to those files itself.
 
 To stop the container attempting the (always-failing) keychain lookup entirely,
-put `{"use_api": false}` in that same file.
+put `"use_api": false` in `claude-usage-limits.json`.
 
 ---
 

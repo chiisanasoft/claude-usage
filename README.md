@@ -103,9 +103,12 @@ docker compose down              # stop (add -v to drop the database volume)
 Your transcripts are mounted **read-only**, the derived SQLite DB lives in a
 named volume, and the port is published to `127.0.0.1` only (the dashboard has
 no authentication). One caveat: the live limits API reads an OAuth token from
-the macOS keychain, which a Linux container cannot do, so the Plan Limits card
-falls back to local/calibrated estimates — run the dashboard natively for live
-percentages. Full details: **[docs/DOCKER.md](docs/DOCKER.md)**.
+the macOS keychain, which a Linux container cannot do. Your plan-limits settings
+are mounted read-only instead, so the Plan Limits card still shows your plan and
+**calibrated** percentages — run the dashboard natively for live ones. Run
+`python cli.py limits` natively once before `docker compose up`, otherwise
+Docker creates directories where those two settings files should be. Full
+details: **[docs/DOCKER.md](docs/DOCKER.md)**.
 
 ---
 

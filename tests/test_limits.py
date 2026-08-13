@@ -558,12 +558,58 @@ class TestApiCache(ApiFetchTestCase):
         self.assertEqual(st["api_raw"], self.RAW)
         self.assertAlmostEqual(st["api_at"], later.timestamp())
 
-    def test_no_credential_serves_cache_without_calling(self):
+    def test_no_credential_serves_a_recent_cache_without_calling(self):
         self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
         limits.read_oauth_credential = lambda *a, **k: None
         self._explode()
-        out = limits.fetch_api_usage(now=NOW + timedelta(hours=1))
+        # Older than the cache window (so we would have tried the network) but
+        # still young enough to stand in for a live reading.
+        out = limits.fetch_api_usage(
+            now=NOW + timedelta(seconds=limits.API_SNAPSHOT_MAX_AGE_SECONDS - 1))
         self.assertEqual(out, self.RAW)
+
+
+class TestStaleSnapshot(ApiFetchTestCase):
+    """A snapshot that can no longer be refreshed must not be served forever.
+    The state file can be mounted read-only into a container, where it is frozen
+    at whatever the host last fetched — presenting that as "live from API" days
+    later is worse than showing an honest calibrated estimate."""
+
+    def test_stale_cache_without_a_credential_returns_none(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+        limits.read_oauth_credential = lambda *a, **k: None
+        self._explode()
+        out = limits.fetch_api_usage(
+            now=NOW + timedelta(seconds=limits.API_SNAPSHOT_MAX_AGE_SECONDS + 1))
+        self.assertIsNone(out)
+
+    def test_stale_cache_without_a_token_returns_none(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+        limits._find_token = lambda cred: None
+        self._explode()
+        self.assertIsNone(limits.fetch_api_usage(now=NOW + timedelta(days=15)))
+
+    def test_stale_cache_after_a_failed_request_returns_none(self):
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp())
+
+        def fake(req, timeout=None):
+            raise OSError("network unreachable")
+        self._urllib.urlopen = fake
+        self.assertIsNone(limits.fetch_api_usage(now=NOW + timedelta(days=15)))
+        # ...while a recent one still is served.
+        self.assertEqual(
+            limits.fetch_api_usage(
+                now=NOW + timedelta(seconds=limits.API_CACHE_SECONDS + 1)),
+            self.RAW)
+
+    def test_backoff_still_serves_a_stale_snapshot(self):
+        # The back-off is at most API_BACKOFF_SECONDS long and only reachable
+        # right after a real 429, so it keeps its "never downgrade" behaviour.
+        self._write_state(api_raw=self.RAW, api_at=NOW.timestamp(),
+                          api_backoff_until=(NOW + timedelta(days=30)).timestamp())
+        self._explode()
+        self.assertEqual(limits.fetch_api_usage(now=NOW + timedelta(days=15)),
+                         self.RAW)
 
 
 class TestApiBackoff(ApiFetchTestCase):
@@ -616,7 +662,7 @@ class TestApiBackoff(ApiFetchTestCase):
             self.calls.append(req.full_url)
             raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
         self._urllib.urlopen = fake
-        out = limits.fetch_api_usage(now=NOW + timedelta(hours=1))
+        out = limits.fetch_api_usage(now=NOW + timedelta(seconds=limits.API_CACHE_SECONDS + 1))
         self.assertEqual(out, self.RAW)
         self.assertNotIn("api_backoff_until", self._state())
 
@@ -757,6 +803,87 @@ class TestPlanOverride(ApiComputeTestCase):
         cfg["plan_override"] = None
         limits.save_config(cfg)
         self.assertEqual(limits.compute(db_path=db, now=NOW)["plan"], "Max (5x)")
+
+
+class TestContainerFallback(TempConfigTestCase):
+    """The container case end-to-end (see docs/DOCKER.md): the config and the
+    cached API state are bind-mounted read-only from the host, but there is no
+    keychain to refresh the snapshot with. The card must still show numbers —
+    calibrated ones, honestly labelled — instead of a frozen "live" reading."""
+
+    ROWS = [(NOW - timedelta(minutes=30), "claude-opus-4-8", 1000, 2000, 500, 100)]
+
+    def setUp(self):
+        super().setUp()
+        self._orig_cred = limits.read_oauth_credential
+        limits.read_oauth_credential = lambda *a, **k: None   # no macOS keychain
+        import urllib.request
+        self._urllib = urllib.request
+        self._orig_urlopen = urllib.request.urlopen
+
+        def no_network(req, timeout=None):
+            raise OSError("network unreachable")
+        urllib.request.urlopen = no_network
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        limits.read_oauth_credential = self._orig_cred
+        self._urllib.urlopen = self._orig_urlopen
+
+    def _seed(self, snapshot_age):
+        """A host-written config (calibrated caps + plan override + known
+        sub-limit structure) plus an API snapshot of the given age."""
+        cfg = limits.default_config()
+        cfg["plan_override"] = "Max (20x)"
+        cfg["known_sublimits"] = {"weekly_opus": False, "weekly_sonnet": False}
+        cfg["session"]["cap_usd"] = 100.0
+        cfg["weekly_all"]["cap_usd"] = 1000.0
+        limits.save_config(cfg)
+        limits.STATE_PATH.write_text(json.dumps({
+            "api_raw": {"five_hour": {"utilization": 99.0}},
+            "api_at": (NOW - snapshot_age).timestamp(),
+        }))
+
+    def test_stale_state_file_falls_back_to_calibrated(self):
+        db = _make_db(self.ROWS)
+        self._seed(snapshot_age=timedelta(days=15))
+        data = limits.compute(db_path=db, now=NOW)
+
+        self.assertFalse(data["api_ok"])
+        self.assertEqual(data["plan"], "Max (20x)")        # from the override
+        cost = calc_cost("claude-opus-4-8", 1000, 2000, 500, 100)
+        for key, cap in (("session", 100.0), ("weekly_all", 1000.0)):
+            block = data[key]
+            self.assertEqual(block["source"], "calibrated")
+            self.assertEqual(block["pct"], round(cost / cap * 100.0, 1))
+        # The 99% from the frozen snapshot must not leak through anywhere.
+        self.assertNotEqual(data["session"]["pct"], 99.0)
+        # known_sublimits says this account has neither sub-limit: no fabricated
+        # rows, even though every turn in the DB is Opus.
+        self.assertIsNone(data["weekly_opus"])
+        self.assertIsNone(data["weekly_sonnet"])
+
+    def test_fresh_state_file_is_still_used(self):
+        db = _make_db(self.ROWS)
+        self._seed(snapshot_age=timedelta(seconds=60))
+        data = limits.compute(db_path=db, now=NOW)
+        self.assertTrue(data["api_ok"])
+        self.assertEqual(data["session"]["source"], "api")
+        self.assertEqual(data["session"]["pct"], 99.0)
+
+    def test_read_only_config_does_not_break_the_request(self):
+        # The mounts are :ro, so the auto-calibration write-back must fail
+        # silently rather than 500 the /api/limits endpoint.
+        db = _make_db(self.ROWS)
+        self._seed(snapshot_age=timedelta(seconds=60))
+        orig_save = limits.save_config
+
+        def readonly(cfg):
+            raise PermissionError("Read-only file system")
+        limits.save_config = readonly
+        self.addCleanup(lambda: setattr(limits, "save_config", orig_save))
+        data = limits.compute(db_path=db, now=NOW)
+        self.assertEqual(data["session"]["pct"], 99.0)
 
 
 if __name__ == "__main__":

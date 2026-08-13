@@ -25,13 +25,31 @@ services:
       # Transcripts: READ-ONLY. The container parses them and must never be
       # able to modify or truncate the real Claude Code logs.
       - "${HOME}/.claude/projects:/home/appuser/.claude/projects:ro"
-      # Derived state (usage.db + claude-usage-limits.json): a named volume, so
+      # Derived state (usage.db): a named volume, so
       # the container's writes never touch the host ~/.claude directory. The DB
       # is fully rebuildable from the transcripts, so losing it costs a rescan.
       # To share the host's existing DB instead, replace this line with:
       #   - "${HOME}/.claude:/home/appuser/.claude"
       # and delete it — but then the container writes into your real ~/.claude.
       - "claude-usage-db:/home/appuser/.claude"
+      # Plan-limits settings + the last API snapshot the host fetched, READ-ONLY
+      # on top of the volume above. Without them the container has no cap to
+      # measure against and the Plan Limits card renders as empty "—" bars.
+      # Neither file contains a token or any credential: the config holds caps,
+      # the plan label and which sub-limits exist; the state file holds the
+      # percentages of the cached usage response. Nothing here forwards keychain
+      # access into the container, and it must stay that way.
+      #
+      # GOTCHA: if a host file does not exist, Docker creates a *directory* at
+      # that path and the container reads nothing. Run `python3 cli.py limits`
+      # natively once (it writes both files) before `docker compose up`. If you
+      # already hit this, delete the stray directories from the named volume.
+      #
+      # A snapshot older than limits.API_SNAPSHOT_MAX_AGE_SECONDS is ignored
+      # rather than shown as live, so the card degrades to calibrated estimates
+      # instead of freezing at whatever the host last saw.
+      - "${HOME}/.claude/claude-usage-limits.json:/home/appuser/.claude/claude-usage-limits.json:ro"
+      - "${HOME}/.claude/claude-usage-limits-state.json:/home/appuser/.claude/claude-usage-limits-state.json:ro"
       # Optional: the Xcode coding-assistant transcripts (macOS only). Uncomment
       # if you use Claude in Xcode; the path is skipped when it does not exist.
       # - "${HOME}/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/projects:/home/appuser/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/projects:ro"
