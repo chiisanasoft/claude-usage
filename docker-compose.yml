@@ -1,4 +1,7 @@
-# Claude Code Usage Dashboard — local container deployment.
+# Claude Code Usage Dashboard — container deployment.
+#
+# This packages the app; it does not make it offline. The dashboard page loads
+# Chart.js from a CDN in the browser. Data stays on the host regardless.
 #   docker compose up -d --build     # start
 #   docker compose down              # stop (add -v to also drop the database)
 # Full notes, including the macOS-keychain limitation: docs/DOCKER.md

@@ -17,7 +17,7 @@ Available as a **web app** (`python cli.py dashboard`) and as a [**VS Code exten
 > **This is a fork.** Upstream is [phuryn/claude-usage](https://github.com/phuryn/claude-usage) (MIT, © Pawel Huryn), which is the origin of everything in this repository unless listed below. This fork adds:
 >
 > - **Plan limit tracking** (`limits.py`, `tests/test_limits.py`) — 5-hour session and weekly rate-limit indicators, working from local data alone; the usage API is opt-in ([why](#the-usage-api-is-opt-in))
-> - **Container deployment** (`Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md`) — the dashboard as a loopback-only web app
+> - **Container deployment** (`Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md`) — the dashboard packaged as a loopback-only web app
 > - The corresponding wiring in `cli.py` / `dashboard.py`
 >
 > Pricing tables and cost calculation are upstream code and are unmodified here; if a newly released model is missing from `PRICING`, its cost is reported as zero. Check the table before trusting a total.
@@ -139,7 +139,9 @@ By default, the scanner checks both `~/.claude/projects/` and the Xcode Claude i
 ## Run in Docker
 
 The dashboard can also run in a container — slim official Python base, no
-dependencies to install, non-root user:
+Python dependencies to install, non-root user. This packages the app; it does
+not make it offline. The page still loads Chart.js from a CDN at runtime, so
+the browser needs internet even though the container does not:
 
 ```
 docker compose up -d --build     # then open http://127.0.0.1:8080

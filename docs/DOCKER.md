@@ -4,6 +4,11 @@ The web dashboard can run in a container. The app is pure standard-library
 Python, so the image is just a slim official `python` base plus four `.py`
 files — no `pip install`, no build step, no dependency lockfile.
 
+Containerising it is packaging, not isolation from the network: the page it
+serves loads Chart.js from `cdn.jsdelivr.net` in the **browser**, so the charts
+need internet even though nothing in the container fetches anything. Your
+transcripts and the derived database never leave the host either way.
+
 The container runs as a **non-root** user (`appuser`, uid 10001) and needs two
 things from the host: your Claude Code transcripts (read-only) and somewhere
 writable to keep the SQLite database it derives from them.
