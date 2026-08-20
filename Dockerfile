@@ -43,6 +43,6 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ['PORT']+'/',timeout=5).read(1)" || exit 1
 
-# `cli.py dashboard` runs an incremental scan, then serves. It also tries to
-# open a browser; that is a no-op in a container and is ignored.
-CMD ["python", "cli.py", "dashboard"]
+# `cli.py dashboard` runs an incremental scan, then serves. --no-browser stops
+# it from trying to open a browser, which cannot work in a container.
+CMD ["python", "cli.py", "dashboard", "--no-browser"]

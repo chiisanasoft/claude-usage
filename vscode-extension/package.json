@@ -1,0 +1,110 @@
+{
+  "name": "claude-usage-phuryn",
+  "displayName": "Claude Code Usage by Paweł Huryn",
+  "description": "Embed your Claude Code usage dashboard (token counts, costs, sessions, projects) directly inside VS Code. Reads local JSONL transcripts, no API calls.",
+  "version": "1.5.5",
+  "publisher": "PawelHuryn",
+  "author": {
+    "name": "Paweł Huryn",
+    "url": "https://www.productcompass.pm"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/phuryn/claude-usage",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phuryn/claude-usage"
+  },
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "usage",
+    "tokens",
+    "cost",
+    "dashboard",
+    "anthropic"
+  ],
+  "icon": "resources/icon.png",
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeUsageSidebar",
+          "title": "Claude Usage",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeUsageSidebar": [
+        {
+          "type": "webview",
+          "id": "claudeUsage.dashboard",
+          "name": "Dashboard"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeUsage.open",
+        "title": "Claude Usage: Open Dashboard"
+      },
+      {
+        "command": "claudeUsage.rescan",
+        "title": "Claude Usage: Rescan Transcripts"
+      },
+      {
+        "command": "claudeUsage.restart",
+        "title": "Claude Usage: Restart Server"
+      },
+      {
+        "command": "claudeUsage.showLogs",
+        "title": "Claude Usage: Show Logs"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Code Usage",
+      "properties": {
+        "claudeUsage.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a Python interpreter (>=3.8). Empty = auto-discover (claude-usage on PATH, then python3, then python)."
+        },
+        "claudeUsage.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a claude-usage clone's cli.py. Empty = auto-discover (Homebrew claude-usage shim, then this clone, then ~/.claude-usage)."
+        },
+        "claudeUsage.port": {
+          "type": "number",
+          "default": 0,
+          "description": "Bind port for the dashboard server. 0 = auto-pick a free port."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "copy-python": "node scripts/copy-python.js",
+    "vscode:prepublish": "npm run copy-python && tsc -p .",
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "npx @vscode/vsce package --no-dependencies",
+    "publish": "npx @vscode/vsce publish --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.94.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

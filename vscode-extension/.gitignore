@@ -1,0 +1,7 @@
+node_modules/
+out/
+*.vsix
+.vscode-test/
+# Generated at package time by scripts/copy-python.js — the .py snapshot
+# that ships in the .vsix. One source of truth (repo root) → reproducible.
+python/

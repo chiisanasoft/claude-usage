@@ -2,12 +2,15 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![claude-code](https://img.shields.io/badge/claude--code-black?style=flat-square)](https://claude.ai/code)
+[![Companion: burnstop](https://img.shields.io/badge/companion-burnstop-blue?style=flat-square)](https://github.com/phuryn/burnstop)
 
 **Pro and Max subscribers get a progress bar. This gives you the full picture.**
 
 Claude Code writes detailed usage logs locally — token counts, models, sessions, projects — regardless of your plan. This dashboard reads those logs and turns them into charts and cost estimates. Works on API, Pro, and Max plans.
 
 ![Claude Usage Dashboard](docs/screenshot.png)
+
+Available as a **web app** (`python cli.py dashboard`) and as a [**VS Code extension**](https://marketplace.visualstudio.com/items?itemName=PawelHuryn.claude-usage-phuryn).
 
 **Created by:** [The Product Compass Newsletter](https://www.productcompass.pm)
 
@@ -46,6 +49,32 @@ Captures usage from:
 
 No `pip install`, no virtual environment, no build step.
 
+### macOS / Linux (Homebrew)
+```
+brew tap phuryn/claude-usage https://github.com/phuryn/claude-usage
+brew install phuryn/claude-usage/claude-usage
+claude-usage dashboard
+```
+
+> Homebrew has disabled installing a formula from an arbitrary raw URL, so tap the repo first (thanks @adrianlungu for the working incantation in #46).
+
+After install, the `claude-usage` command is on your `PATH` and accepts the same subcommands as `python cli.py` (`scan`, `today`, `stats`, `dashboard`).
+
+### Any OS (uv tool / pipx)
+```
+uv tool install git+https://github.com/phuryn/claude-usage
+claude-usage dashboard
+```
+
+Installs the `claude-usage` command without a clone (works with [`pipx`](https://pipx.pypa.io/) too: `pipx install git+https://github.com/phuryn/claude-usage`). The tool stays dependency-free — this only adds packaging metadata, no third-party runtime deps (#144).
+
+### macOS / Linux (clone)
+```
+git clone https://github.com/phuryn/claude-usage
+cd claude-usage
+python3 cli.py dashboard
+```
+
 ### Windows
 ```
 git clone https://github.com/chiisanasoft/claude-usage
@@ -53,18 +82,24 @@ cd claude-usage
 python cli.py dashboard
 ```
 
-### macOS / Linux
+### Docker
 ```
 git clone https://github.com/chiisanasoft/claude-usage
 cd claude-usage
-python3 cli.py dashboard
+bash scripts/run-docker.sh
 ```
+
+Opens the dashboard at **http://localhost:9898**.
+
+The script builds the image, then runs the container with:
+- `~/.claude` mounted **read-only** — the container can read your transcripts but cannot modify them
+- A named Docker volume (`claude-usage-data`) for the SQLite database — persisted across restarts, isolated from your home directory
 
 ---
 
 ## Usage
 
-> On macOS/Linux, use `python3` instead of `python` in all commands below.
+> On macOS/Linux, use `python3` instead of `python` in all commands below. If you installed via Homebrew, replace `python cli.py` with `claude-usage`.
 
 ```
 # Scan JSONL files and populate the database (~/.claude/usage.db)
@@ -85,7 +120,10 @@ python cli.py limits
 # Scan + open browser dashboard at http://localhost:8080
 python cli.py dashboard
 
-# Custom host and port via environment variables
+# Custom host and port
+python cli.py dashboard --host 0.0.0.0 --port 9000
+
+# Environment variables are also supported
 HOST=0.0.0.0 PORT=9000 python cli.py dashboard
 
 # Scan a custom projects directory
@@ -179,24 +217,44 @@ Claude Code writes one JSONL file per session to `~/.claude/projects/`. Each lin
 
 `scanner.py` parses those files and stores the data in a SQLite database at `~/.claude/usage.db`.
 
-`dashboard.py` serves a single-page dashboard on `localhost:8080` with Chart.js charts (loaded from CDN). It auto-refreshes every 30 seconds and supports model filtering with bookmarkable URLs. The bind address and port can be overridden with `HOST` and `PORT` environment variables (defaults: `localhost`, `8080`).
+`dashboard.py` serves a single-page dashboard on `localhost:8080` with Chart.js charts (loaded from CDN). It auto-refreshes every 30 seconds and supports model filtering and a date-range dropdown with bookmarkable URLs. A sticky section nav jumps between sections, and every chart/table can be collapsed (remembered across reloads). The bind address and port can be configured with the `--host` and `--port` flags, or the `HOST` and `PORT` environment variables (defaults: `localhost`, `8080`).
 
 ---
 
 ## Cost estimates
 
-Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.com/pricing#api](https://claude.com/pricing#api)).
+Costs are calculated using **Anthropic API pricing as of June 2026** ([claude.com/pricing#api](https://claude.com/pricing#api)).
 
-**Only models whose name contains `opus`, `sonnet`, or `haiku` are included in cost calculations.** Local models, unknown models, and any other model names are excluded (shown as `n/a`).
+**Only models whose name contains `fable`, `mythos`, `opus`, `sonnet`, or `haiku` are included in cost calculations.** Local models, unknown models, and any other model names are excluded (shown as `n/a`).
 
 | Model | Input | Output | Cache Write | Cache Read |
 |-------|-------|--------|------------|-----------|
+| claude-fable-5 | $10.00/MTok | $50.00/MTok | $12.50/MTok | $1.00/MTok |
+| claude-mythos-5 | $10.00/MTok | $50.00/MTok | $12.50/MTok | $1.00/MTok |
+| claude-opus-4-8 | $5.00/MTok | $25.00/MTok | $6.25/MTok | $0.50/MTok |
 | claude-opus-4-7 | $5.00/MTok | $25.00/MTok | $6.25/MTok | $0.50/MTok |
 | claude-opus-4-6 | $5.00/MTok | $25.00/MTok | $6.25/MTok | $0.50/MTok |
 | claude-sonnet-4-6 | $3.00/MTok | $15.00/MTok | $3.75/MTok | $0.30/MTok |
 | claude-haiku-4-5 | $1.00/MTok | $5.00/MTok | $1.25/MTok | $0.10/MTok |
 
 > **Note:** These are API prices. If you use Claude Code via a Max or Pro subscription, your actual cost structure is different (subscription-based, not per-token).
+
+---
+
+## VS Code extension
+
+If you'd rather see the dashboard inside your editor, the same UI is available as a VS Code extension. Same data, same charts, embedded as an activity-bar sidebar.
+
+[**Install from the VS Code Marketplace →**](https://marketplace.visualstudio.com/items?itemName=PawelHuryn.claude-usage-phuryn)
+
+[**See in Open VSX Registry →**](https://open-vsx.org/extension/PawelHuryn/claude-usage-phuryn)
+
+![VS Code extension — daily usage](docs/usage1.png)
+![VS Code extension — hourly + projects](docs/usage2.png)
+
+The Python sources are bundled inside the `.vsix`, so the only end-user requirement is **Python 3.8+ on your `PATH`**. After install, click the gauge icon in the activity bar — the server spawns automatically and the dashboard renders in the sidebar.
+
+See [vscode-extension/README.md](vscode-extension/README.md) for settings, commands, discovery order, and local-install instructions.
 
 ---
 
@@ -207,4 +265,8 @@ Costs are calculated using **Anthropic API pricing as of April 2026** ([claude.c
 | `scanner.py` | Parses JSONL transcripts, writes to `~/.claude/usage.db` |
 | `dashboard.py` | HTTP server + single-page HTML/JS dashboard |
 | `cli.py` | `scan`, `today`, `week`, `stats`, `limits`, `dashboard` commands |
-| `limits.py` | Session (5h) + weekly limit indicators, calibration, read-only usage API |
+| `limits.py` | Session (5h) + weekly limit indicators, calibration, opt-in usage API |
+| `Formula/claude-usage.rb` | Homebrew formula — install with `brew tap phuryn/claude-usage` then `brew install phuryn/claude-usage/claude-usage` |
+| `vscode-extension/` | VS Code extension — embeds the dashboard inside VS Code |
+| `Dockerfile` / `docker-compose.yml` | Container image and Compose stack (see [docs/DOCKER.md](docs/DOCKER.md)) |
+| `scripts/run-docker.sh` | Build and run the dashboard in Docker with a read-only `~/.claude` mount |

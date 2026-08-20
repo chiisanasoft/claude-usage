@@ -30,6 +30,7 @@ Stdlib only. Python 3.8+.
 """
 
 import json
+import os
 import sqlite3
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,9 @@ from pathlib import Path
 # Reuse the single source of truth for pricing (AGENTS.md: don't add a 3rd copy).
 from cli import calc_cost, get_pricing
 
-DB_PATH = Path.home() / ".claude" / "usage.db"
+# Same override upstream added to cli/scanner/dashboard, so the container and
+# the CLI agree on which database "the" database is.
+DB_PATH = Path(os.environ.get("CLAUDE_USAGE_DB", Path.home() / ".claude" / "usage.db"))
 CONFIG_PATH = Path.home() / ".claude" / "claude-usage-limits.json"
 # Cached API snapshot + back-off clock. Kept out of CONFIG_PATH so the config
 # stays a small hand-editable settings file.

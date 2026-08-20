@@ -25,8 +25,10 @@ python cli.py stats                 # all-time stats
 python cli.py limits                # 5h session + weekly limit indicators
 python cli.py limits --no-api --json      # local-only payload, machine readable
 python cli.py limits --debug-api          # verbose (token-free) API diagnostics
-python cli.py dashboard             # scan + open http://localhost:8080
-python cli.py scan --projects-dir PATH    # scan a custom transcripts dir
+python cli.py dashboard                          # scan + open http://localhost:8080
+python cli.py dashboard --host 0.0.0.0 --port 9000
+python cli.py scan --projects-dir PATH           # scan a custom transcripts dir
+# or via env vars:
 HOST=0.0.0.0 PORT=9000 python cli.py dashboard
 
 python -m unittest discover -s tests -v             # full test suite (CI runs this)
@@ -119,16 +121,18 @@ Key points:
 
 The entire UI lives in `HTML_TEMPLATE` as a raw string. Chart.js is loaded from CDN.
 
+Client-side UI state (collapsed sections, the 24h update-check cache) is kept in **`localStorage`**, which is keyed by the page's origin. In the VS Code extension the dashboard is embedded as an **iframe at `http://127.0.0.1:<port>/`**, so that state only survives a window reload if the port is stable. The extension therefore remembers the last port in `workspaceState` and reuses it when it's still free (`resolveStablePort` in [vscode-extension/src/port-allocator.ts](vscode-extension/src/port-allocator.ts)) — don't revert that to a fresh `pickFreePort` every launch, or the panel silently loses its state each reload.
+
 ### Container deployment
 
 A container deployment of the dashboard exists: [Dockerfile](Dockerfile), [docker-compose.yml](docker-compose.yml), documented in [docs/DOCKER.md](docs/DOCKER.md). It is packaging only — no application code is involved, and it must stay that way. Constraints worth knowing before you change anything it depends on:
 
-- **No path configuration exists.** `DB_PATH` is a module-level `Path.home() / ".claude" / "usage.db"` in `scanner.py` / `cli.py` / `dashboard.py` / `limits.py`, with no env var or flag (only `scan --projects-dir` is overridable, and `cmd_dashboard` doesn't take a projects dir on the server side). The container therefore configures paths purely by setting `HOME=/home/appuser` and bind-mounting onto the paths the code already hardcodes. If you ever add a `CLAUDE_USAGE_DB` env var, update the compose file to use it.
+- **No path configuration exists.** `DB_PATH` honours `CLAUDE_USAGE_DB` in `scanner.py` / `cli.py` / `dashboard.py` / `limits.py` and otherwise falls back to `Path.home() / ".claude" / "usage.db"`; the transcripts dir is only overridable via `scan --projects-dir` (`cmd_dashboard` doesn't take one on the server side). The Compose stack deliberately leaves `CLAUDE_USAGE_DB` unset and configures paths by setting `HOME=/home/appuser` and bind-mounting onto the paths the code already resolves, so the container and a native run agree on the layout.
 - **`HOST` / `PORT` env vars are the only network knobs** (`serve()` in [dashboard.py](dashboard.py), `cmd_dashboard` in [cli.py](cli.py)). The image sets `HOST=0.0.0.0` — mandatory inside a container — and compose publishes to `127.0.0.1:8080` so the unauthenticated UI is not exposed to the LAN. Don't change the default `localhost` bind in the app; the container overrides it deliberately.
 - **Transcripts are mounted read-only**; the only writable mount is a named volume at `/home/appuser/.claude` holding the derived `usage.db`. `claude-usage-limits.json` and `claude-usage-limits-state.json` are bind-mounted **read-only** from the host on top of that volume — without the config the container has no `cap_usd`, so every Plan Limits bar renders `—`. Neither file contains a credential. Because those mounts are `:ro`, the auto-calibration write-back in `compute()` (and `_write_state`) *must* stay exception-swallowing, or a container request would 500. The scanner must keep treating the projects dirs as strictly read-only. Bind-mounting a file that doesn't exist on the host makes Docker create a directory at that path, so the docs tell users to run `limits` natively once first.
 - **The live limits API cannot work there.** `read_oauth_credential()` shells out to the macOS `security` binary; in a Linux container that raises and is swallowed, so `/api/limits` degrades to calibrated (from the mounted config) or uncalibrated. That graceful degradation (exception-swallowing in `read_oauth_credential` / `fetch_api_usage`) is load-bearing for the container — keep it. Do not add any code that extracts, forwards or persists the OAuth token for container use.
 - **A cached API snapshot is only served as a fallback while it is young** (`API_SNAPSHOT_MAX_AGE_SECONDS`, 10 min, matching the back-off window). The mounted state file can never be refreshed inside the container, and rendering a days-old percentage as `source: "api"` / "live from API" is worse than falling through to the calibrated tier. The fresh-cache (`API_CACHE_SECONDS`) and 429 back-off paths are unaffected.
-- The CMD is `python cli.py dashboard`, which scans then serves; its `webbrowser.open` call is a harmless no-op in the container.
+- The CMD is `python cli.py dashboard --no-browser`, which scans then serves without trying to open a browser.
 
 ## Testing notes
 
@@ -146,3 +150,66 @@ When merging community PRs, **preserve the original author's commit so they get 
 - When closing duplicate PRs (multiple authors fixed the same bug independently), thank each one and explain that landing the earliest version isn't a quality judgment.
 
 This applies to all agents working on this repo, not just Claude Code.
+
+## Versioning and releases
+
+[SemVer](https://semver.org/). **`CHANGELOG.md` is the canonical version reference**; tags are a projection of it, created automatically.
+
+The release flow:
+1. While work accumulates on `DEV`, the `## vX.Y.Z — TBD` heading at the top of `CHANGELOG.md` collects bullets. (For automated triage runs, see the routine note below.)
+2. When the maintainer is ready to release, they finalize the heading (`TBD` → today's date), **bump both `scanner.VERSION` and `vscode-extension/package.json`'s `version` to match the CHANGELOG version** (all three ship in lockstep — the extension bundles the Python sources, and `scanner.VERSION` is the runtime version reported by `cli.py --version` and the dashboard footer since the CHANGELOG isn't bundled into the `.vsix`), **run [`scripts/bump-formula.sh`](scripts/bump-formula.sh) on `DEV` to repoint the Homebrew formula at the previous release's tag tarball** (see "Homebrew formula and self-referential SHA" below — this is a plain `DEV` commit that reaches brew users via this same merge, so it never touches `main` directly), merge `DEV → main` with `merge --no-ff` (so the release boundary is visible in `git log main`), and push `main`. A parity test (`tests/test_version.py`) fails the suite if the three drift, so in practice they're bumped together on `DEV` when the version heading is written.
+3. [`.github/workflows/tag-on-merge.yml`](.github/workflows/tag-on-merge.yml) fires on the push, sees the new `## vX.Y.Z` heading in the CHANGELOG diff, and:
+   - creates a lightweight tag at the merge commit (**no `git tag` step for the maintainer**), then
+   - builds the VS Code extension `.vsix` and publishes a **GitHub Release** for that tag — the matching CHANGELOG section as the release notes, the built `.vsix` attached as a release asset.
+
+So every release is both a tag *and* a GitHub Release with the installable `.vsix` downloadable from it. This mirrors the manual procedure in the sibling `grok-build-vscode` repo (`scripts/release.*`: tag + `gh release create` with the `.vsix` attached), adapted to this repo's CHANGELOG-driven, merge-to-`main` model — so it's automated rather than a local script. Marketplace publish (`vsce publish`) stays separate and explicit, exactly as there.
+
+**The release step asserts `vscode-extension/package.json`'s version equals the CHANGELOG version and fails loudly if not** — the `.vsix` filename embeds the package version, so a mismatch would mislabel the asset. If you forget the bump, the tag is still created but the Release step fails; bump `package.json` and create the Release by hand (`gh release create vX.Y.Z --notes-file <section> vscode-extension/<name>-X.Y.Z.vsix`), since a same-commit re-push won't re-add the heading to re-trigger the workflow.
+
+The workflow is idempotent: if the tag already exists (someone tagged manually before the workflow caught up) the tag step is a no-op, and if the Release already exists the release step is a no-op. It also no-ops entirely on pushes that don't add a new version heading (typo fixes, docs-only edits, etc.).
+
+Existing tags `v1.0.0`, `v1.1.0`, `v1.1.1` are lightweight and were created by hand before the workflow existed. `v1.1.2` was the first tag created by the workflow. The workflow only *adds* missing tags; it never reconciles existing ones. Don't bother re-tagging the legacy ones.
+
+### CHANGELOG conventions
+
+The workflow trusts the CHANGELOG, so the format matters. Every new release entry on `DEV` follows this exact shape:
+
+```
+## vX.Y.Z — TBD
+
+### <Area>
+
+- One bullet per change, past tense, with a PR/issue link and `thanks @author` where the change came from a contributor (#73, thanks @thomasleveil)
+```
+
+Format rules the workflow relies on:
+
+| Field | Required form | Why |
+|---|---|---|
+| Heading | `## vX.Y.Z` (exactly two `#`, the `v` prefix, three numeric components — strict semver) | The workflow regex `^## v[0-9]+\.[0-9]+\.[0-9]+([[:space:]]|$)` won't match anything else. `v1.1`, `v1.1.0-rc1`, `V1.1.0` are all silently ignored. |
+| Separator | ` — ` (em-dash with surrounding spaces) | Cosmetic but consistent. The workflow ignores everything after the version. |
+| Date | `TBD` while accumulating on `DEV`; replace with `YYYY-MM-DD` *at the moment of merging to `main`* | The workflow doesn't enforce dates — but a `TBD` heading that ships to main means the release looks unfinished forever. |
+| Subsections | `### Dashboard`, `### Scanner`, `### Packaging`, `### Project / docs` — pick the smallest set that fits | Keeps the CHANGELOG scannable. |
+| Bullets | Past tense, link the PR/issue with `#N`, credit external contributors with `thanks @login` | Lets readers (and future maintainers tracing history) find the source quickly. |
+
+**The TBD → date rule is the only step a human must remember at release time.** If you forget, the workflow still tags correctly, but the CHANGELOG entry on main reads `## v1.1.3 — TBD` forever. Fix-up commit can correct it, but it'll feel sloppy.
+
+Patch (`Z` increments) is the default for any release. Bump minor (`Y`) when a non-breaking user-visible feature lands (e.g. Today range button shipping alone would have been a minor in a different world). Bump major (`X`) only on breaking changes — there have been none and likely won't be soon. There's no automation around picking the right bump; the maintainer (or `/triage`) decides when writing the CHANGELOG heading on `DEV`.
+
+### Homebrew formula and self-referential SHA
+
+The Homebrew formula at `Formula/claude-usage.rb` lives inside this same repo. Be careful when bumping it: if the formula's `url` points at a tarball that **contains the formula itself with that sha256**, the sha256 is self-referential and uncomputable. Practical rule: a release's formula must point at the **previous** release's tarball, never its own. In v1.1.1 the formula points at v1.1.0's commit-SHA tarball, so brew users installing v1.1.1's formula receive v1.1.0 code — that's the trade-off of keeping the formula in-tree.
+
+Now that the auto-tag workflow exists, formula bumps use the tag-tarball URL (`archive/refs/tags/vX.Y.Z.tar.gz`) instead of commit SHAs — stabler and shorter — as long as the tag-tarball pointed at is from the *previous* release.
+
+**Automate the bump; never hand-edit the three pinned lines.** [`scripts/bump-formula.sh`](scripts/bump-formula.sh) fetches a released tag's tarball, computes its `sha256`, and rewrites the `url` / `version` / `sha256` lines (leaving `head`, `homepage`, and comments alone). With no argument it targets the latest `v*` tag on origin — run during release prep, before the new tag exists, that's the previous release, exactly what the self-referential rule requires.
+
+**Why a `DEV`-only commit is enough — and why it's one release behind.** Brew reads the formula from the tap's default branch (`main`) HEAD, never from `DEV` or a tag. So the bump is a normal `DEV` commit that becomes visible to brew users only when `DEV → main` merges — which is precisely at the next release. That timing is the point: it lets us pin at the just-frozen *previous* tag and ship it with the release, so **brew always tracks one release behind, advancing automatically each release**, with no direct push to `main` (dodging `main`'s branch protection) and no hand-editing to forget. The manual, forget-prone bump is what let the pin silently rot at v1.1.0 from v1.1.1 through v1.5.0; v1.5.2 caught it up to v1.5.1 and wired in this routine. The only thing a `DEV`-only bump can't do is move brew *between* releases — you'd need a release (a `DEV → main` merge) for that, which is fine because the pin only ever changes at release boundaries anyway.
+
+## Weekly triage routine
+
+The repo has a self-contained slash command at [.claude/commands/triage.md](.claude/commands/triage.md) that automates the weekly PR/issue cleanup we used to ship v1.1.0: classify open items with Codex, merge no-brainers to DEV preserving authorship, run tests, close duplicates / scope-violations with friendly messages, bump CHANGELOG by patch, push DEV. **The routine never pushes to `main`** — release decisions stay with the maintainer.
+
+Register the Windows Task Scheduler entry with [scripts/setup-weekly-triage.ps1](scripts/setup-weekly-triage.ps1). Logs go to `logs/triage-*.log`.
+
+If you're working on this repo and want to invoke the routine ad-hoc, just type `/triage` in Claude Code. Hard safety rails (test-passing gates, no security-sensitive auto-merges, no scope-changing merges, Codex sign-off required on closures) live inside `triage.md`.

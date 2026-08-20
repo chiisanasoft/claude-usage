@@ -25,6 +25,9 @@ def _make_db(rows):
     fd.close()
     path = Path(fd.name)
     conn = sqlite3.connect(path)
+    # init_db's schema migration reads PRAGMA rows by column name, so the
+    # connection needs the same row factory the production paths use.
+    conn.row_factory = sqlite3.Row
     init_db(conn)
     for i, (dt, model, inp, out, cr, cc) in enumerate(rows):
         conn.execute(
@@ -392,7 +395,7 @@ class TestUnpricedConsumption(ApiComputeTestCase):
     Sonnet rates). The payload must let renderers tell the two apart."""
 
     def test_unpriced_window_reports_cost_unknown(self):
-        db = _make_db([(NOW - timedelta(minutes=15), "fable-1", 1000, 2000, 0, 0)])
+        db = _make_db([(NOW - timedelta(minutes=15), "gemma-3-27b", 1000, 2000, 0, 0)])
         data = limits.compute(db_path=db, use_api=False, now=NOW)
         s = data["session"]
         self.assertEqual(s["turns"], 1)
@@ -409,7 +412,7 @@ class TestUnpricedConsumption(ApiComputeTestCase):
 
     def test_partially_priced_window_keeps_its_cost(self):
         db = _make_db([
-            (NOW - timedelta(minutes=20), "fable-1", 1000, 2000, 0, 0),
+            (NOW - timedelta(minutes=20), "gemma-3-27b", 1000, 2000, 0, 0),
             (NOW - timedelta(minutes=10), "claude-opus-4-8", 1000, 2000, 0, 0),
         ])
         data = limits.compute(db_path=db, use_api=False, now=NOW)
@@ -418,11 +421,11 @@ class TestUnpricedConsumption(ApiComputeTestCase):
         self.assertEqual(s["priced_turns"], 1)
         self.assertTrue(s["cost_known"])
         self.assertGreater(s["consumption_usd"], 0)
-        self.assertEqual([m["priced"] for m in s["by_model"] if m["model"] == "fable-1"],
+        self.assertEqual([m["priced"] for m in s["by_model"] if m["model"] == "gemma-3-27b"],
                          [False])
 
     def test_no_percentage_from_an_unpriced_window(self):
-        db = _make_db([(NOW - timedelta(minutes=15), "fable-1", 1000, 2000, 0, 0)])
+        db = _make_db([(NOW - timedelta(minutes=15), "gemma-3-27b", 1000, 2000, 0, 0)])
         cfg = limits.load_config()
         cfg["session"]["cap_usd"] = 100.0
         limits.save_config(cfg)
@@ -435,7 +438,7 @@ class TestUnpricedConsumption(ApiComputeTestCase):
         import io
         import contextlib
         from cli import _render_limit_block
-        db = _make_db([(NOW - timedelta(minutes=15), "fable-1", 1000, 2000, 0, 0)])
+        db = _make_db([(NOW - timedelta(minutes=15), "gemma-3-27b", 1000, 2000, 0, 0)])
         data = limits.compute(db_path=db, use_api=False, now=NOW)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

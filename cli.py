@@ -15,9 +15,16 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, date, timedelta
 
-DB_PATH = Path.home() / ".claude" / "usage.db"
+from scanner import VERSION
+
+DB_PATH = Path(os.environ.get("CLAUDE_USAGE_DB", Path.home() / ".claude" / "usage.db"))
 
 PRICING = {
+    # Fable / Mythos — Anthropic's most capable class, priced at 2x Opus.
+    # (Mythos 5 shares Fable 5's pricing; Project-Glasswing access only.)
+    "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
+    "claude-mythos-5":   {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
+    "claude-opus-4-8":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
     "claude-opus-4-7":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
     "claude-opus-4-6":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
     "claude-opus-4-5":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
@@ -39,8 +46,10 @@ def get_pricing(model):
             return PRICING[key]
     # Substring fallback: match model family by keyword
     m = model.lower()
+    if "fable" in m or "mythos" in m:
+        return PRICING["claude-fable-5"]
     if "opus" in m:
-        return PRICING["claude-opus-4-7"]
+        return PRICING["claude-opus-4-8"]
     if "sonnet" in m:
         return PRICING["claude-sonnet-4-6"]
     if "haiku" in m:
@@ -75,7 +84,17 @@ def require_db():
     if not DB_PATH.exists():
         print("Database not found. Run: python cli.py scan")
         sys.exit(1)
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    # Ensure the schema is current before querying. The read commands query the
+    # `agents` table and the `is_subagent`/`agent_id` columns, so a pre-existing
+    # DB from before those were added would raise "no such column" when a read
+    # command runs before the next scan migrates it. init_db is idempotent
+    # (CREATE ... IF NOT EXISTS + additive column checks), so this is a cheap
+    # no-op once migrated. Mirrors get_dashboard_data in dashboard.py.
+    from scanner import init_db
+    init_db(conn)
+    return conn
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -87,7 +106,6 @@ def cmd_scan(projects_dir=None):
 
 def cmd_today():
     conn = require_db()
-    conn.row_factory = sqlite3.Row
     today = date.today().isoformat()
 
     rows = conn.execute("""
@@ -108,6 +126,15 @@ def cmd_today():
         SELECT COUNT(DISTINCT session_id) as cnt
         FROM turns
         WHERE substr(timestamp, 1, 10) = ?
+    """, (today,)).fetchone()
+
+    subagent = conn.execute("""
+        SELECT
+            COUNT(*) as turns,
+            SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens) as tokens
+        FROM turns
+        WHERE substr(timestamp, 1, 10) = ?
+          AND COALESCE(is_subagent, 0) = 1
     """, (today,)).fetchone()
 
     print()
@@ -137,6 +164,7 @@ def cmd_today():
     print(f"  {'TOTAL':<30}  turns={total_turns:<4}  in={fmt(total_inp):<8}  out={fmt(total_out):<8}  cost={fmt_cost(total_cost)}")
     print()
     print(f"  Sessions today:   {sessions['cnt']}")
+    print(f"  Subagent tokens:  {fmt(subagent['tokens'] or 0)}  ({fmt(subagent['turns'] or 0)} turns)")
     print(f"  Cache read:       {fmt(total_cr)}")
     print(f"  Cache creation:   {fmt(total_cc)}")
     hr()
@@ -146,7 +174,6 @@ def cmd_today():
 
 def cmd_week():
     conn = require_db()
-    conn.row_factory = sqlite3.Row
 
     today_d = date.today()
     start_d = today_d - timedelta(days=6)
@@ -242,7 +269,6 @@ def cmd_week():
 
 def cmd_stats():
     conn = require_db()
-    conn.row_factory = sqlite3.Row
 
     # Session-level info (count, date range)
     session_info = conn.execute("""
@@ -294,6 +320,15 @@ def cmd_stats():
         LIMIT 5
     """).fetchall()
 
+    # Subagent totals (subagent tokens are included in the all-time totals above)
+    subagent = conn.execute("""
+        SELECT
+            COUNT(*) as turns,
+            SUM(input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens) as tokens
+        FROM turns
+        WHERE COALESCE(is_subagent, 0) = 1
+    """).fetchone()
+
     # Daily average (last 30 days)
     daily_avg = conn.execute("""
         SELECT
@@ -326,11 +361,13 @@ def cmd_stats():
     print(f"  Period:           {first_date} to {last_date}")
     print(f"  Total sessions:   {session_info['sessions'] or 0:,}")
     print(f"  Total turns:      {fmt(totals['turns'] or 0)}")
+    print(f"  Subagent turns:   {fmt(subagent['turns'] or 0)}")
     print()
     print(f"  Input tokens:     {fmt(totals['inp'] or 0):<12}  (raw prompt tokens)")
     print(f"  Output tokens:    {fmt(totals['out'] or 0):<12}  (generated tokens)")
     print(f"  Cache read:       {fmt(totals['cr'] or 0):<12}  (90% cheaper than input)")
     print(f"  Cache creation:   {fmt(totals['cc'] or 0):<12}  (25% premium on input)")
+    print(f"  Subagent tokens:  {fmt(subagent['tokens'] or 0):<12}  (included in totals)")
     print()
     print(f"  Est. total cost:  ${total_cost:.4f}")
     hr()
@@ -515,27 +552,46 @@ def cmd_limits(args=None):
     print()
 
 
-def cmd_dashboard(projects_dir=None, host=None, port=None):
-    import webbrowser
+def cmd_dashboard(projects_dir=None, host=None, port=None, no_browser=False, surface=None):
     import threading
     import time
 
-    print("Running scan first...")
-    cmd_scan(projects_dir=projects_dir)
-
-    print("\nStarting dashboard server...")
     from dashboard import serve
 
     host = host or os.environ.get("HOST", "localhost")
     port = int(port or os.environ.get("PORT", "8080"))
 
-    def open_browser():
-        time.sleep(1.0)
-        webbrowser.open(f"http://{host}:{port}")
+    # Bind and serve the port *first*, then scan in the background. A cold scan
+    # over a large ~/.claude/projects backlog can take well over a minute, and
+    # the VS Code extension kills the process if it doesn't answer /api/data
+    # within ~10s (see vscode-extension/src/server-manager.ts). Serving up front
+    # means the port is live immediately; the dashboard shows whatever's already
+    # in the DB and auto-refreshes as the background scan commits new data.
+    #
+    # Capture cmd_scan into a local so the background thread closes over the
+    # current binding — keeps the test suite's mock.patch(cli.cmd_scan) effective
+    # and prevents the thread from ever touching the real DB after a patch lifts.
+    scan = cmd_scan
 
-    t = threading.Thread(target=open_browser, daemon=True)
-    t.start()
-    serve(host=host, port=port)
+    def background_scan():
+        print("Scanning in the background...")
+        scan(projects_dir=projects_dir)
+        print("Background scan complete.")
+
+    threading.Thread(target=background_scan, daemon=True).start()
+
+    # Open a browser for users running this as a script (see README). The VS Code
+    # extension passes --no-browser since it embeds the dashboard in a webview.
+    if not no_browser:
+        import webbrowser
+
+        def open_browser():
+            time.sleep(1.0)
+            webbrowser.open(f"http://{host}:{port}")
+
+        threading.Thread(target=open_browser, daemon=True).start()
+
+    serve(host=host, port=port, surface=surface)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -552,8 +608,9 @@ Usage:
                        [--calibrate-session N] [--calibrate-weekly N]
                        [--calibrate-opus N] [--calibrate-sonnet N]
                        [--weekly-reset DOW HOUR]
-  python cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT]
-                                                 Scan + start dashboard
+  python cli.py dashboard [--projects-dir PATH] [--host HOST] [--port PORT] [--no-browser] [--surface SURFACE]
+                                                 Scan + start dashboard (opens a browser unless --no-browser)
+  python cli.py --version                    Print the version and exit
 """
 
 COMMANDS = {
@@ -572,7 +629,12 @@ def parse_named_arg(args, flag):
             return args[i + 1]
     return None
 
-if __name__ == "__main__":
+def main():
+    """Console entry point (``claude-usage``) and ``python cli.py`` dispatch."""
+    if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V", "version"):
+        print(VERSION)
+        sys.exit(0)
+
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         print(USAGE)
         sys.exit(0)
@@ -586,6 +648,8 @@ if __name__ == "__main__":
             projects_dir=projects_dir,
             host=parse_named_arg(rest, "--host"),
             port=parse_named_arg(rest, "--port"),
+            no_browser="--no-browser" in rest,
+            surface=parse_named_arg(rest, "--surface"),
         )
     elif command == "scan" and projects_dir:
         cmd_scan(projects_dir=projects_dir)
@@ -593,3 +657,7 @@ if __name__ == "__main__":
         cmd_limits(rest)
     else:
         COMMANDS[command]()
+
+
+if __name__ == "__main__":
+    main()

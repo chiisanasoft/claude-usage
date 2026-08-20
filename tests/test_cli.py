@@ -1,6 +1,10 @@
 """Tests for cli.py - pricing, formatting, and cost calculation."""
 
+import io
 import unittest
+from contextlib import redirect_stdout
+from unittest import mock
+import cli
 from cli import get_pricing, calc_cost, fmt, fmt_cost, PRICING
 
 
@@ -11,12 +15,46 @@ class TestGetPricing(unittest.TestCase):
         self.assertEqual(p["output"], 25.00)
 
     def test_all_known_models_have_pricing(self):
-        for model in ("claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
+        for model in ("claude-fable-5", "claude-mythos-5",
+                       "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
                        "claude-sonnet-4-7", "claude-sonnet-4-6", "claude-sonnet-4-5",
                        "claude-haiku-4-7", "claude-haiku-4-6", "claude-haiku-4-5"):
             p = get_pricing(model)
             self.assertGreater(p["input"], 0, f"Missing input price for {model}")
             self.assertGreater(p["output"], 0, f"Missing output price for {model}")
+
+    def test_fable_and_mythos_have_explicit_entries(self):
+        """Regression guard for #136/#137 — Fable 5 and Mythos 5 must be priced
+        explicitly at 2x Opus, not fall through to $0/n/a or an Opus rate."""
+        for model in ("claude-fable-5", "claude-mythos-5"):
+            self.assertIn(model, PRICING)
+            p = get_pricing(model)
+            self.assertEqual(p["input"], 10.00, f"{model} input price wrong")
+            self.assertEqual(p["output"], 50.00, f"{model} output price wrong")
+            self.assertEqual(p["cache_read"], 1.00, f"{model} cache_read wrong")
+            self.assertEqual(p["cache_write"], 12.50, f"{model} cache_write wrong")
+
+    def test_fable_date_suffix_matches(self):
+        """JSONL model strings may carry a date suffix."""
+        p = get_pricing("claude-fable-5-20260601")
+        self.assertEqual(p["input"], 10.00)
+        self.assertEqual(p["output"], 50.00)
+
+    def test_substring_match_fable_and_mythos(self):
+        """Unknown future fable/mythos variants resolve to Fable pricing,
+        not the generic opus/sonnet/haiku rates or n/a."""
+        for model in ("some-fable-variant", "internal-mythos-test"):
+            p = get_pricing(model)
+            self.assertEqual(p["input"], 10.00, f"{model} should map to Fable pricing")
+            self.assertEqual(p["output"], 50.00, f"{model} should map to Fable pricing")
+
+    def test_opus_4_8_has_explicit_entry(self):
+        """Regression guard for issue #133 — Opus 4.8 must be present, not just
+        resolved via the generic 'opus' substring fallback."""
+        self.assertIn("claude-opus-4-8", PRICING)
+        p = get_pricing("claude-opus-4-8")
+        self.assertEqual(p["input"], 5.00)
+        self.assertEqual(p["output"], 25.00)
 
     def test_opus_4_7_has_explicit_entry(self):
         """Regression guard for issue #61 — Opus 4.7 must be present."""
@@ -162,6 +200,19 @@ class TestPricingConsistency(unittest.TestCase):
             p = get_pricing(model)
             self.assertEqual(p["input"], 1.00, f"{model} input price wrong")
             self.assertEqual(p["output"], 5.00, f"{model} output price wrong")
+
+
+class TestDashboardNoBrowser(unittest.TestCase):
+    """The VS Code extension passes --no-browser; CLI users get a browser."""
+
+    def test_no_browser_suppresses_webbrowser(self):
+        with mock.patch.object(cli, "cmd_scan"), \
+             mock.patch("dashboard.serve") as mock_serve, \
+             mock.patch("webbrowser.open") as mock_open, \
+             redirect_stdout(io.StringIO()):
+            cli.cmd_dashboard(host="127.0.0.1", port=9999, no_browser=True)
+            mock_open.assert_not_called()
+            mock_serve.assert_called_once()
 
 
 if __name__ == "__main__":
