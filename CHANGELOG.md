@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Pricing accuracy
+
+- Add explicit `PRICING` entries for `claude-opus-5` and `claude-sonnet-5` (CLI and dashboard). Sonnet 5 is **cheaper** than Sonnet 4.x, so the family substring fallback had been overcharging it by 50% — a wrong number that looks plausible, unlike a zero
+- Render per-model cost cells for unpriced models as `n/a` instead of `$0.0000`, so "cost nothing" and "no price known" stop sharing a glyph
+- Record every unpriced model in `cli.UNKNOWN_MODELS` and report them on stderr after the report (`warn_unknown_models`), stating that the totals are an undercount. Previously an unpriced model removed its turns from every total with no warning at all
+
 ### Plan limits
 
 - Add `limits.py` and a `python cli.py limits` command: Claude-desktop-style indicators for the current 5-hour session window and the weekly window (all models, plus Opus / Sonnet sub-limits when the plan has them), with consumption in API-equivalent dollars, turn counts and reset countdowns

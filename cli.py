@@ -24,10 +24,17 @@ PRICING = {
     # (Mythos 5 shares Fable 5's pricing; Project-Glasswing access only.)
     "claude-fable-5":    {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
     "claude-mythos-5":   {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
+    # Sources: https://platform.claude.com/docs/en/about-claude/pricing
+    # cache_write is the 5-minute TTL column throughout, matching every other
+    # entry here; the transcripts record only a token count, never which TTL.
+    "claude-opus-5":     {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
     "claude-opus-4-8":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
     "claude-opus-4-7":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
     "claude-opus-4-6":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
     "claude-opus-4-5":   {"input": 5.00, "output": 25.00, "cache_read": 0.50, "cache_write": 6.25},
+    # Sonnet 5 is cheaper than Sonnet 4.x, so the substring fallback below would
+    # overcharge it by 50%. It needs an explicit entry, not a family guess.
+    "claude-sonnet-5":   {"input": 2.00, "output": 10.00, "cache_read": 0.20, "cache_write": 2.50},
     "claude-sonnet-4-7": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
     "claude-sonnet-4-5": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
@@ -35,6 +42,13 @@ PRICING = {
     "claude-haiku-4-6":  {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25},
     "claude-haiku-4-5":  {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25},
 }
+
+# Every model name that reached get_pricing() without a price. A miss is not an
+# error — local and third-party models legitimately have no Anthropic price —
+# but it silently removes turns from every total, so it must be reported rather
+# than absorbed. See warn_unknown_models().
+UNKNOWN_MODELS = set()
+
 
 def get_pricing(model):
     if not model:
@@ -54,6 +68,7 @@ def get_pricing(model):
         return PRICING["claude-sonnet-4-6"]
     if "haiku" in m:
         return PRICING["claude-haiku-4-5"]
+    UNKNOWN_MODELS.add(model)
     return None
 
 def calc_cost(model, inp, out, cache_read, cache_creation):
@@ -76,6 +91,31 @@ def fmt(n):
 
 def fmt_cost(c):
     return f"${c:.4f}"
+
+def fmt_model_cost(model, c):
+    """Cost cell for a per-model row.
+
+    "$0.0000" and "no price for this model" are different facts, and printing
+    both as zero is what lets an unpriced model disappear from a total without
+    anyone noticing. Unpriced rows read "n/a"; warn_unknown_models() then says
+    the total is short.
+    """
+    return "n/a" if get_pricing(model) is None else fmt_cost(c)
+
+def warn_unknown_models(stream=sys.stderr):
+    """Report models that had no price, once, after the numbers are printed.
+
+    Returns True if anything was reported, so callers can test it.
+    """
+    if not UNKNOWN_MODELS:
+        return False
+    print(f"\nwarning: no price for {', '.join(sorted(UNKNOWN_MODELS))}",
+          file=stream)
+    print("         Those turns are counted as $0, so every total above is "
+          "an undercount.", file=stream)
+    print("         Add the model to PRICING in cli.py (and dashboard.py) if "
+          "it is an Anthropic model.", file=stream)
+    return True
 
 def hr(char="-", width=60):
     print(char * width)
@@ -158,7 +198,7 @@ def cmd_today():
         total_cr  += r["cr"]  or 0
         total_cc  += r["cc"]  or 0
         total_turns += r["turns"]
-        print(f"  {r['model']:<30}  turns={r['turns']:<4}  in={fmt(r['inp'] or 0):<8}  out={fmt(r['out'] or 0):<8}  cost={fmt_cost(cost)}")
+        print(f"  {r['model']:<30}  turns={r['turns']:<4}  in={fmt(r['inp'] or 0):<8}  out={fmt(r['out'] or 0):<8}  cost={fmt_model_cost(r['model'], cost)}")
 
     hr()
     print(f"  {'TOTAL':<30}  turns={total_turns:<4}  in={fmt(total_inp):<8}  out={fmt(total_out):<8}  cost={fmt_cost(total_cost)}")
@@ -254,7 +294,7 @@ def cmd_week():
         total_cr    += r["cr"]  or 0
         total_cc    += r["cc"]  or 0
         total_turns += r["turns"]
-        print(f"    {r['model']:<30}  turns={r['turns']:<4}  in={fmt(r['inp'] or 0):<8}  out={fmt(r['out'] or 0):<8}  cost={fmt_cost(cost)}")
+        print(f"    {r['model']:<30}  turns={r['turns']:<4}  in={fmt(r['inp'] or 0):<8}  out={fmt(r['out'] or 0):<8}  cost={fmt_model_cost(r['model'], cost)}")
 
     hr()
     print(f"    {'TOTAL':<30}  turns={total_turns:<4}  in={fmt(total_inp):<8}  out={fmt(total_out):<8}  cost={fmt_cost(total_cost)}")
@@ -376,7 +416,7 @@ def cmd_stats():
     for r in by_model:
         cost = calc_cost(r["model"], r["inp"] or 0, r["out"] or 0, r["cr"] or 0, r["cc"] or 0)
         print(f"    {r['model']:<30}  sessions={r['sessions']:<4}  turns={fmt(r['turns'] or 0):<6}  "
-              f"in={fmt(r['inp'] or 0):<8}  out={fmt(r['out'] or 0):<8}  cost={fmt_cost(cost)}")
+              f"in={fmt(r['inp'] or 0):<8}  out={fmt(r['out'] or 0):<8}  cost={fmt_model_cost(r['model'], cost)}")
 
     hr()
     print("  Top Projects:")
@@ -657,6 +697,10 @@ def main():
         cmd_limits(rest)
     else:
         COMMANDS[command]()
+
+    # After the report, never instead of it: a warning printed first scrolls
+    # away, and the numbers it qualifies are what the reader is looking at.
+    warn_unknown_models()
 
 
 if __name__ == "__main__":

@@ -84,7 +84,14 @@ Pricing is duplicated in two places that **must stay in sync**:
 - [cli.py](cli.py) `PRICING` dict (Python)
 - [dashboard.py](dashboard.py) `PRICING` const inside `HTML_TEMPLATE` (JavaScript)
 
-`get_pricing` / `getPricing` resolve in three tiers: exact match → `startswith` (handles date-suffixed model IDs like `claude-opus-4-7-20260215`) → substring fallback on `opus` / `sonnet` / `haiku`. Models that don't match any tier return `None` and are billed at $0 (shown as `n/a`) — this is intentional so local/3rd-party models (gemma, glm, etc.) aren't charged at Sonnet rates.
+`get_pricing` / `getPricing` resolve in three tiers: exact match → `startswith` (handles date-suffixed model IDs like `claude-opus-4-7-20260215`) → substring fallback on `fable`/`mythos` / `opus` / `sonnet` / `haiku`. Models that don't match any tier return `None` — intentional, so local/3rd-party models (gemma, glm, etc.) aren't charged at Sonnet rates.
+
+**A miss must stay visible.** Two rules follow from it, and both exist because breaking them once cost a database 33% of its true total with no symptom:
+
+- Per-model rows render `n/a`, not `$0.00` (`fmt_model_cost`). "It cost nothing" and "we have no price for it" are different facts and must not share a glyph.
+- Every miss is recorded in `cli.UNKNOWN_MODELS`, and `warn_unknown_models()` reports them on stderr *after* the report, saying the totals are an undercount. Don't move that call ahead of the output, and don't let a new code path compute costs without it.
+
+The substring fallback is a second hazard: a newly released model resolves to whatever its family last cost. That is silently wrong in *both* directions — Sonnet 5 is cheaper than Sonnet 4.x, so the guess overcharged it by 50%, which is far harder to notice than a zero. **New Anthropic models need an explicit `PRICING` entry**, in `cli.py` and in the JS copy in `dashboard.py`. `tests/test_cli.py` guards both rules.
 
 ### Limit indicators
 

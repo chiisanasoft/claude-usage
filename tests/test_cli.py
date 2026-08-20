@@ -217,3 +217,76 @@ class TestDashboardNoBrowser(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnknownModelIsNotSilentlyFree(unittest.TestCase):
+    """A model with no price must never look like a model that cost nothing.
+
+    This is the regression guard for a real miscount: an unpriced model
+    accounted for 21% of the turns in one database and 33% of the true
+    total, and every table showed it as $0.00 with no warning.
+    """
+
+    def setUp(self):
+        self._saved = set(cli.UNKNOWN_MODELS)
+        cli.UNKNOWN_MODELS.clear()
+
+    def tearDown(self):
+        cli.UNKNOWN_MODELS.clear()
+        cli.UNKNOWN_MODELS.update(self._saved)
+
+    def test_unpriced_model_is_recorded(self):
+        self.assertIsNone(get_pricing("gemma-3-27b"))
+        self.assertIn("gemma-3-27b", cli.UNKNOWN_MODELS)
+
+    def test_priced_model_is_not_recorded(self):
+        self.assertIsNotNone(get_pricing("claude-opus-5"))
+        self.assertEqual(cli.UNKNOWN_MODELS, set())
+
+    def test_unpriced_row_renders_na_not_zero(self):
+        cell = cli.fmt_model_cost("gemma-3-27b", 0.0)
+        self.assertEqual(cell, "n/a")
+        self.assertNotEqual(cell, fmt_cost(0.0))
+
+    def test_priced_row_renders_the_amount(self):
+        self.assertEqual(cli.fmt_model_cost("claude-opus-5", 1.5), fmt_cost(1.5))
+
+    def test_warning_names_the_model_and_says_the_total_is_short(self):
+        get_pricing("gemma-3-27b")
+        out = io.StringIO()
+        self.assertTrue(cli.warn_unknown_models(stream=out))
+        text = out.getvalue()
+        self.assertIn("gemma-3-27b", text)
+        self.assertIn("undercount", text)
+
+    def test_no_warning_when_every_model_was_priced(self):
+        out = io.StringIO()
+        self.assertFalse(cli.warn_unknown_models(stream=out))
+        self.assertEqual(out.getvalue(), "")
+
+
+class TestFifthGenerationPricing(unittest.TestCase):
+    """The 5 generation must resolve to its own prices, not to a 4.x guess.
+
+    Sonnet 5 is the case that matters: it is *cheaper* than Sonnet 4.x, so
+    the family fallback overcharges rather than undercharges, and an
+    inflated number is much harder to spot than a zero.
+    """
+
+    def test_sonnet_5_is_not_priced_as_sonnet_4(self):
+        p5 = get_pricing("claude-sonnet-5")
+        self.assertEqual((p5["input"], p5["output"]), (2.00, 10.00))
+        self.assertNotEqual(p5, get_pricing("claude-sonnet-4-6"))
+
+    def test_opus_5_has_an_explicit_entry(self):
+        self.assertIn("claude-opus-5", PRICING)
+        self.assertEqual(get_pricing("claude-opus-5")["input"], 5.00)
+
+    def test_dated_suffix_still_resolves(self):
+        self.assertEqual(get_pricing("claude-sonnet-5-20260601"),
+                         PRICING["claude-sonnet-5"])
+
+    def test_cost_uses_the_five_generation_price(self):
+        # 1M output tokens: $10 at Sonnet 5 prices, $15 at Sonnet 4.x.
+        self.assertAlmostEqual(
+            calc_cost("claude-sonnet-5", 0, 1_000_000, 0, 0), 10.00)

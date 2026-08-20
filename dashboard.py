@@ -778,10 +778,15 @@ const PRICING = {
   // (Mythos 5 shares Fable 5's pricing; Project-Glasswing access only.)
   'claude-fable-5':    { input: 10.00, output: 50.00, cache_write: 12.50, cache_read: 1.00 },
   'claude-mythos-5':   { input: 10.00, output: 50.00, cache_write: 12.50, cache_read: 1.00 },
+  // Sources: https://platform.claude.com/docs/en/about-claude/pricing
+  'claude-opus-5':     { input:  5.00, output: 25.00, cache_write:  6.25, cache_read: 0.50 },
   'claude-opus-4-8':   { input:  5.00, output: 25.00, cache_write:  6.25, cache_read: 0.50 },
   'claude-opus-4-7':   { input:  5.00, output: 25.00, cache_write:  6.25, cache_read: 0.50 },
   'claude-opus-4-6':   { input:  5.00, output: 25.00, cache_write:  6.25, cache_read: 0.50 },
   'claude-opus-4-5':   { input:  5.00, output: 25.00, cache_write:  6.25, cache_read: 0.50 },
+  // Sonnet 5 is cheaper than Sonnet 4.x; without an explicit entry the
+  // family fallback below would overcharge it by 50%.
+  'claude-sonnet-5':   { input:  2.00, output: 10.00, cache_write:  2.50, cache_read: 0.20 },
   'claude-sonnet-4-7': { input:  3.00, output: 15.00, cache_write:  3.75, cache_read: 0.30 },
   'claude-sonnet-4-6': { input:  3.00, output: 15.00, cache_write:  3.75, cache_read: 0.30 },
   'claude-sonnet-4-5': { input:  3.00, output: 15.00, cache_write:  3.75, cache_read: 0.30 },
