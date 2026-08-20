@@ -16,7 +16,7 @@ Available as a **web app** (`python cli.py dashboard`) and as a [**VS Code exten
 
 > **This is a fork.** Upstream is [phuryn/claude-usage](https://github.com/phuryn/claude-usage) (MIT, © Pawel Huryn), which is the origin of everything in this repository unless listed below. This fork adds:
 >
-> - **Plan limit tracking** (`limits.py`, `tests/test_limits.py`) — 5-hour session and weekly rate-limit indicators, with calibrated estimates when the usage API is unavailable
+> - **Plan limit tracking** (`limits.py`, `tests/test_limits.py`) — 5-hour session and weekly rate-limit indicators, working from local data alone; the usage API is opt-in ([why](#the-usage-api-is-opt-in))
 > - **Container deployment** (`Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md`) — the dashboard as a loopback-only web app
 > - The corresponding wiring in `cli.py` / `dashboard.py`
 >
@@ -168,7 +168,7 @@ details: **[docs/DOCKER.md](docs/DOCKER.md)**.
 
 The percentage needs a cap that Anthropic doesn't publish and that isn't in the local logs, so it comes from one of three sources, in order of preference:
 
-1. **Live API** — the read-only `/api/oauth/usage` endpoint, authenticated with the OAuth token Claude Code already stored (macOS keychain). It is an undocumented usage-status endpoint: it runs no inference, so it costs nothing and consumes none of your token budget. It is rate limited, so responses are cached briefly on disk and throttled requests fall back to the last good snapshot instead of dropping to a local-only estimate. Percentages and reset times then match the desktop app, and the caps are auto-calibrated in the background so estimates stay good later.
+1. **Live API — off by default, opt in with `--use-api`.** See [below](#the-usage-api-is-opt-in) for what enabling it does before you turn it on. It reads the exact percentages and reset times from the `/api/oauth/usage` endpoint, so the bars match the desktop app and the caps are auto-calibrated in the background for later runs without it.
 2. **Calibrated** — you tell it once what the desktop app shows (`--calibrate-session 20`) and the cap is backed out of your current consumption.
 3. **Uncalibrated** — no cap known. Consumption and the reset countdown are still shown; the bar reads `—`.
 
@@ -178,7 +178,10 @@ If the plan shown is wrong — the keychain credential records the tier from whe
 # Session + weekly indicators (runs an incremental scan first)
 python cli.py limits
 
-# Skip the API and use only local data / calibration
+# Opt in to the usage API for this run (reads the keychain — see below)
+python cli.py limits --use-api
+
+# Force the local-only path even if the config enables the API
 python cli.py limits --no-api
 
 # Raw JSON payload (same shape the dashboard consumes)
@@ -200,7 +203,20 @@ python cli.py limits --weekly-reset 3 11
 python cli.py limits --debug-api
 ```
 
-Settings persist in `~/.claude/claude-usage-limits.json` — detected plan, the caps for each window (with the time they were calibrated), the weekly reset anchor, and a `use_api` flag you can set to `false` to disable API calls permanently. Without a reset anchor the weekly window is a rolling 7 days.
+Settings persist in `~/.claude/claude-usage-limits.json` — detected plan, the caps for each window (with the time they were calibrated), the weekly reset anchor, and the `use_api` flag described below. Without a reset anchor the weekly window is a rolling 7 days.
+
+### The usage API is opt-in
+
+**Nothing here reads a credential or touches the network unless you ask it to.** Everything else in this tool works entirely from the JSONL files Claude Code has already written to disk.
+
+Turning the API on does two things you should agree to deliberately:
+
+- It reads the **Claude Code OAuth credential from the macOS keychain** (`security find-generic-password -s "Claude Code-credentials"`). The token is used as a bearer header and is never logged, written to the config, or forwarded anywhere — `--debug-api` prints diagnostics with the token redacted — but it is still your credential, read by a tool that is not Claude Code.
+- It calls **`GET https://api.anthropic.com/api/oauth/usage`**, the endpoint the desktop app's own usage screen uses. It is read-only and runs no inference, so it costs nothing and consumes none of your token budget. It is also **undocumented**: Anthropic publishes no contract for it, so it can change or stop answering at any time, and the terms under which you may call it are for you to judge.
+
+Enable it per run with `--use-api`, or permanently by setting `"use_api": true` in `~/.claude/claude-usage-limits.json`. `--no-api` always wins, so a config that enables it can still be overridden for a single run.
+
+Without it you lose only the *exact* percentages: calibrate once against the desktop app (`--calibrate-session 20`) and every later run is local-only and still accurate.
 
 The dashboard shows the same bars in a **Plan Limits** card at the top of the page, served by `GET /api/limits` and refreshed every 30 seconds.
 

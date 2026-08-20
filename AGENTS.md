@@ -23,7 +23,7 @@ python cli.py today                 # today's usage by model
 python cli.py week                  # last 7 days, per-day + by-model
 python cli.py stats                 # all-time stats
 python cli.py limits                # 5h session + weekly limit indicators
-python cli.py limits --no-api --json      # local-only payload, machine readable
+python cli.py limits --use-api --json     # opt in to the usage API (reads the keychain)
 python cli.py limits --debug-api          # verbose (token-free) API diagnostics
 python cli.py dashboard                          # scan + open http://localhost:8080
 python cli.py dashboard --host 0.0.0.0 --port 9000

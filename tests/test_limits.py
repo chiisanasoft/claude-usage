@@ -282,6 +282,45 @@ class ApiComputeTestCase(TempConfigTestCase):
         limits.read_oauth_credential = self._orig_cred
 
 
+class TestApiIsOptIn(ApiComputeTestCase):
+    """The usage API reads a keychain credential and calls an endpoint
+    Anthropic does not document. Neither may happen unless the user asked."""
+
+    ROWS = [(NOW - timedelta(minutes=15), "claude-opus-4-8", 1000, 2000, 0, 0)]
+
+    def _count_calls(self):
+        """Replace both network/keychain entry points with counters."""
+        calls = []
+        self._orig_fetch = limits.fetch_api_usage
+        self._orig_cred = limits.read_oauth_credential
+        self.addCleanup(self._restore)
+        limits.fetch_api_usage = lambda *a, **k: calls.append("fetch")
+        limits.read_oauth_credential = lambda *a, **k: calls.append("keychain")
+        return calls
+
+    def test_default_config_does_not_enable_the_api(self):
+        self.assertFalse(limits.default_config()["use_api"])
+
+    def test_compute_does_not_touch_the_keychain_by_default(self):
+        calls = self._count_calls()
+        data = limits.compute(db_path=_make_db(self.ROWS), now=NOW)
+        self.assertEqual(calls, [])
+        self.assertFalse(data["api_ok"])
+
+    def test_explicit_opt_in_reaches_the_api(self):
+        calls = self._count_calls()
+        limits.compute(db_path=_make_db(self.ROWS), use_api=True, now=NOW)
+        self.assertIn("keychain", calls)
+
+    def test_config_can_turn_it_on(self):
+        cfg = limits.load_config()
+        cfg["use_api"] = True
+        limits.save_config(cfg)
+        calls = self._count_calls()
+        limits.compute(db_path=_make_db(self.ROWS), now=NOW)
+        self.assertIn("keychain", calls)
+
+
 class TestApiAnchoredWindow(ApiComputeTestCase):
     # API says the session resets at 15:30 -> the window really started at 10:30,
     # so the 10:00 turn must NOT be counted (the gap heuristic would count it).
@@ -294,7 +333,7 @@ class TestApiAnchoredWindow(ApiComputeTestCase):
     def test_window_start_comes_from_api_reset(self):
         db = _make_db(self.ROWS)
         self._use_api(LIVE_RAW)
-        data = limits.compute(db_path=db, now=NOW)
+        data = limits.compute(db_path=db, use_api=True, now=NOW)
         s = data["session"]
         self.assertEqual(s["turns"], 2)
         self.assertEqual(s["resets_in_seconds"], 3 * 3600 + 1800)
@@ -314,7 +353,7 @@ class TestApiAnchoredWindow(ApiComputeTestCase):
     def test_anchor_persists_across_an_api_outage(self):
         db = _make_db(self.ROWS)
         self._use_api(LIVE_RAW)
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         cfg = limits.load_config()
         self.assertEqual(cfg["session"]["window_reset_at"], "2026-06-27T15:30:00.000Z")
         # API now unavailable: the persisted anchor keeps the correct window.
@@ -343,14 +382,14 @@ class TestCalibrationGuard(ApiComputeTestCase):
     def test_low_percentage_does_not_write_a_cap(self):
         db = _make_db(self.ROWS)
         self._use_api(self._raw(3))
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         # 3% of a coarse integer reading would swing the cap by a third.
         self.assertIsNone(limits.load_config()["session"]["cap_usd"])
 
     def test_low_percentage_does_not_overwrite_a_better_cap(self):
         db = _make_db(self.ROWS)
         self._use_api(self._raw(40))
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         cap40 = limits.load_config()["session"]["cap_usd"]
         self.assertIsNotNone(cap40)
         self.assertAlmostEqual(limits.load_config()["session"]["calibrated_pct"], 40.0)
@@ -358,13 +397,13 @@ class TestCalibrationGuard(ApiComputeTestCase):
         # Same window generation, lower reading -> must be ignored.
         self._restore()
         self._use_api(self._raw(12))
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         self.assertEqual(limits.load_config()["session"]["cap_usd"], cap40)
 
         # A higher reading in the same window is more reliable -> accepted.
         self._restore()
         self._use_api(self._raw(80))
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         cfg = limits.load_config()
         self.assertNotEqual(cfg["session"]["cap_usd"], cap40)
         self.assertAlmostEqual(cfg["session"]["calibrated_pct"], 80.0)
@@ -372,7 +411,7 @@ class TestCalibrationGuard(ApiComputeTestCase):
     def test_new_window_generation_resets_the_guard(self):
         db = _make_db(self.ROWS)
         self._use_api(self._raw(80))
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         self.assertAlmostEqual(limits.load_config()["session"]["calibrated_pct"], 80.0)
         # Next window (different resets_at) -> a 40% reading is allowed again.
         self._restore()
@@ -380,7 +419,7 @@ class TestCalibrationGuard(ApiComputeTestCase):
             {"kind": "session", "group": "session", "percent": 40,
              "resets_at": "2026-06-27T16:00:00+00:00"},
         ]})
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         self.assertAlmostEqual(limits.load_config()["session"]["calibrated_pct"], 40.0)
 
     def test_manual_calibration_records_its_percentage(self):
@@ -710,14 +749,14 @@ class TestKnownSublimits(ApiComputeTestCase):
             "seven_day_opus": {"utilization": 40.0},
             "seven_day_sonnet": None,
         })
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         self.assertEqual(limits.load_config()["known_sublimits"],
                          {"weekly_opus": True, "weekly_sonnet": False})
 
     def test_live_response_without_per_model_keys_records_absence(self):
         db = _make_db(self.OPUS_ROWS)
         self._use_api(LIVE_RAW)
-        data = limits.compute(db_path=db, now=NOW)
+        data = limits.compute(db_path=db, use_api=True, now=NOW)
         self.assertIsNone(data["weekly_opus"])
         self.assertEqual(limits.load_config()["known_sublimits"],
                          {"weekly_opus": False, "weekly_sonnet": False})
@@ -782,7 +821,7 @@ class TestPlanOverride(ApiComputeTestCase):
     def test_derived_label_is_used_when_no_override(self):
         db = _make_db(self.ROWS)
         self._use_api(self.RAW, cred=self.CRED_5X)
-        self.assertEqual(limits.compute(db_path=db, now=NOW)["plan"], "Max (5x)")
+        self.assertEqual(limits.compute(db_path=db, use_api=True, now=NOW)["plan"], "Max (5x)")
 
     def test_override_wins_over_the_derived_label(self):
         db = _make_db(self.ROWS)
@@ -790,7 +829,7 @@ class TestPlanOverride(ApiComputeTestCase):
         cfg["plan_override"] = "Max (20x)"
         limits.save_config(cfg)
         self._use_api(self.RAW, cred=self.CRED_5X)
-        self.assertEqual(limits.compute(db_path=db, now=NOW)["plan"], "Max (20x)")
+        self.assertEqual(limits.compute(db_path=db, use_api=True, now=NOW)["plan"], "Max (20x)")
 
     def test_clearing_the_override_falls_back_to_the_real_tier(self):
         db = _make_db(self.ROWS)
@@ -798,14 +837,14 @@ class TestPlanOverride(ApiComputeTestCase):
         cfg["plan_override"] = "Max (20x)"
         limits.save_config(cfg)
         self._use_api(self.RAW, cred=self.CRED_5X)
-        limits.compute(db_path=db, now=NOW)
+        limits.compute(db_path=db, use_api=True, now=NOW)
         # The *derived* label is what gets cached — caching the override would
         # make clearing it fall back to the override itself.
         cfg = limits.load_config()
         self.assertEqual(cfg["plan"], "Max (5x)")
         cfg["plan_override"] = None
         limits.save_config(cfg)
-        self.assertEqual(limits.compute(db_path=db, now=NOW)["plan"], "Max (5x)")
+        self.assertEqual(limits.compute(db_path=db, use_api=True, now=NOW)["plan"], "Max (5x)")
 
 
 class TestContainerFallback(TempConfigTestCase):
@@ -850,7 +889,7 @@ class TestContainerFallback(TempConfigTestCase):
     def test_stale_state_file_falls_back_to_calibrated(self):
         db = _make_db(self.ROWS)
         self._seed(snapshot_age=timedelta(days=15))
-        data = limits.compute(db_path=db, now=NOW)
+        data = limits.compute(db_path=db, use_api=True, now=NOW)
 
         self.assertFalse(data["api_ok"])
         self.assertEqual(data["plan"], "Max (20x)")        # from the override
@@ -869,7 +908,7 @@ class TestContainerFallback(TempConfigTestCase):
     def test_fresh_state_file_is_still_used(self):
         db = _make_db(self.ROWS)
         self._seed(snapshot_age=timedelta(seconds=60))
-        data = limits.compute(db_path=db, now=NOW)
+        data = limits.compute(db_path=db, use_api=True, now=NOW)
         self.assertTrue(data["api_ok"])
         self.assertEqual(data["session"]["source"], "api")
         self.assertEqual(data["session"]["pct"], 99.0)
@@ -885,7 +924,7 @@ class TestContainerFallback(TempConfigTestCase):
             raise PermissionError("Read-only file system")
         limits.save_config = readonly
         self.addCleanup(lambda: setattr(limits, "save_config", orig_save))
-        data = limits.compute(db_path=db, now=NOW)
+        data = limits.compute(db_path=db, use_api=True, now=NOW)
         self.assertEqual(data["session"]["pct"], 99.0)
 
 

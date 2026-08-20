@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Plan limits — the usage API is now opt-in
+
+- `use_api` defaults to **false**. Reading the Claude Code OAuth credential out of the macOS keychain and calling an endpoint Anthropic does not document are both choices a user should make deliberately, not inherit from a default
+- Add `--use-api` to enable it for a single run; `--no-api` still works and still wins over the config
+- README now states plainly what enabling it does — which credential is read, which endpoint is called, and that the endpoint is undocumented
+
 ### Pricing accuracy
 
 - Add explicit `PRICING` entries for `claude-opus-5` and `claude-sonnet-5` (CLI and dashboard). Sonnet 5 is **cheaper** than Sonnet 4.x, so the family substring fallback had been overcharging it by 50% — a wrong number that looks plausible, unlike a zero

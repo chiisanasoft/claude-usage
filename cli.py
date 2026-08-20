@@ -552,7 +552,15 @@ def cmd_limits(args=None):
             limits.save_config(cfg)
             print(f"Plan set to {label}")
 
-    use_api = False if "--no-api" in args else None
+    # --no-api still works and still wins: it was the documented way to force
+    # the local-only path, and a flag that silences a network call must never
+    # stop being honoured.
+    if "--no-api" in args:
+        use_api = False
+    elif "--use-api" in args:
+        use_api = True
+    else:
+        use_api = None      # fall through to the config (default: off)
     data = limits.compute(use_api=use_api, scan_first="--no-scan" not in args)
 
     if "--json" in args:
@@ -644,7 +652,7 @@ Usage:
   python cli.py today                        Show today's usage summary
   python cli.py week                         Show last 7 days (per-day + by-model)
   python cli.py stats                        Show all-time statistics
-  python cli.py limits [--no-api] [--json] [--no-scan]   Session (5h) + weekly limits
+  python cli.py limits [--use-api] [--json] [--no-scan]  Session (5h) + weekly limits
                        [--calibrate-session N] [--calibrate-weekly N]
                        [--calibrate-opus N] [--calibrate-sonnet N]
                        [--weekly-reset DOW HOUR]

@@ -99,7 +99,12 @@ def default_config():
         # Which per-model weekly sub-limits the API last confirmed. Empty until
         # a first successful API call; see the inclusion logic in compute().
         "known_sublimits": {},
-        "use_api": True,              # try the read-only usage API
+        # Off by default, and it must stay that way. Turning it on lets this
+        # tool read the Claude Code OAuth credential out of the macOS keychain
+        # and call an endpoint Anthropic does not document. Both are things a
+        # user should choose deliberately, not inherit from a default. Enable
+        # per-run with `--use-api`, or persistently by setting this to true.
+        "use_api": False,
         # calibrated_pct / window_reset_at record *what* a cap was derived from so
         # a coarse low reading can't clobber a cap derived from a reliable high one.
         "session": {"cap_usd": None, "calibrated_at": None,
@@ -725,7 +730,7 @@ def compute(db_path=DB_PATH, use_api=None, now=None, auto_calibrate=True,
     now = now or _now_utc()
     cfg = load_config()
     if use_api is None:
-        use_api = cfg.get("use_api", True)
+        use_api = cfg.get("use_api", False)
 
     if scan_first:
         try:
