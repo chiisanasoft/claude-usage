@@ -11,6 +11,14 @@ Claude Code writes detailed usage logs locally — token counts, models, session
 
 **Created by:** [The Product Compass Newsletter](https://www.productcompass.pm)
 
+> **This is a fork.** Upstream is [phuryn/claude-usage](https://github.com/phuryn/claude-usage) (MIT, © Pawel Huryn), which is the origin of everything in this repository unless listed below. This fork adds:
+>
+> - **Plan limit tracking** (`limits.py`, `tests/test_limits.py`) — 5-hour session and weekly rate-limit indicators, with calibrated estimates when the usage API is unavailable
+> - **Container deployment** (`Dockerfile`, `docker-compose.yml`, `docs/DOCKER.md`) — the dashboard as a loopback-only web app
+> - The corresponding wiring in `cli.py` / `dashboard.py`
+>
+> Pricing tables and cost calculation are upstream code and are unmodified here; if a newly released model is missing from `PRICING`, its cost is reported as zero. Check the table before trusting a total.
+
 ---
 
 ## What this tracks
@@ -40,14 +48,14 @@ No `pip install`, no virtual environment, no build step.
 
 ### Windows
 ```
-git clone https://github.com/phuryn/claude-usage
+git clone https://github.com/chiisanasoft/claude-usage
 cd claude-usage
 python cli.py dashboard
 ```
 
 ### macOS / Linux
 ```
-git clone https://github.com/phuryn/claude-usage
+git clone https://github.com/chiisanasoft/claude-usage
 cd claude-usage
 python3 cli.py dashboard
 ```
